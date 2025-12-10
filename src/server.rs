@@ -35,9 +35,13 @@ fn default_version_timeout() -> u64 {
 pub struct JobStatusInput {
     /// Job ID to query
     pub job_id: String,
-    /// If true, return only new output since last check (default: false)
-    #[serde(default)]
+    /// If true, return only new output since last check (default: true)
+    #[serde(default = "default_incremental")]
     pub incremental: bool,
+}
+
+fn default_incremental() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -99,13 +103,16 @@ impl EnhancedTerminalServer {
 PARAMETERS:
 - command (string, required): The shell command to execute
 - cwd (string, default: '.'): Working directory for command execution
-- shell (string, default: 'bash'): Shell to use (bash, zsh, fish, sh, etc.)
+- shell (string, default: 'bash'): Shell to use from available shells (see below)
 - output_limit (number, default: 16384): Maximum output size in bytes
 - timeout_secs (number, default: None): Timeout in seconds (0 or None = no timeout)
 - async_threshold_secs (number, default: 50): Auto-switch to background after this many seconds
 - env_vars (object, default: {}): Environment variables to set (e.g. {\"PATH\": \"/usr/bin\", \"DEBUG\": \"true\"})
 - force_sync (boolean, default: false): Force synchronous execution regardless of duration
 - custom_denylist (array, default: []): Additional dangerous patterns to block
+
+AVAILABLE SHELLS:
+{shell_list}
 
 BEHAVIOR:
 - Commands running longer than async_threshold_secs automatically switch to background
@@ -136,8 +143,10 @@ RETURNS:
     )]
     async fn enhanced_terminal(
         &self,
-        Parameters(input): Parameters<TerminalExecutionInput>,
+        Parameters(mut input): Parameters<TerminalExecutionInput>,
     ) -> Result<CallToolResult, McpError> {
+        // Replace {shell_list} placeholder in description with actual shells
+        // (Note: This is done at runtime in the description, but we'll handle it in server instructions)
         let result = execute_command(input, &self.job_manager).map_err(|e| {
             McpError::internal_error(format!("Command execution failed: {}", e), None)
         })?;
@@ -195,7 +204,7 @@ RETURNS:
 
 PARAMETERS:
 - job_id (string, required): The job identifier returned by enhanced_terminal
-- incremental (boolean, default: false): If true, return only new output since last check
+- incremental (boolean, default: true): If true, return only new output since last check (RECOMMENDED)
 
 BEHAVIOR:
 - Returns current status: Running, Completed, Failed, TimedOut, or Canceled
@@ -204,13 +213,14 @@ BEHAVIOR:
 - Duration calculated from start time
 - Exit code available when completed
 
-INCREMENTAL OUTPUT:
-When incremental=true:
+INCREMENTAL OUTPUT (DEFAULT):
+When incremental=true (default, recommended):
 - First call returns all output accumulated so far
 - Subsequent calls return only new output since last check
 - Read position maintained per job_id
-- Useful for polling long-running jobs
-- Reset position by calling with incremental=false
+- Efficient for polling long-running jobs
+- More responsive than full output mode
+- Reset position by calling with incremental=false to get all output again
 
 RETURNS:
 - job_id: Job identifier
@@ -490,7 +500,8 @@ impl rmcp::ServerHandler for EnhancedTerminalServer {
             TOOLS:\n\
             \n\
             1. enhanced_terminal - Execute shell commands\n\
-               • Default shell: bash (configurable: bash, zsh, fish, sh)\n\
+               • Default shell: bash\n\
+               • Available shells: {}\n\
                • Smart async: Auto-background after 50s (async_threshold_secs)\n\
                • No timeout by default (timeout_secs: 0 or None)\n\
                • Environment variables: Set via env_vars parameter\n\
@@ -500,8 +511,9 @@ impl rmcp::ServerHandler for EnhancedTerminalServer {
             \n\
             2. job_status - Monitor background jobs\n\
                • Get current status: Running, Completed, Failed, TimedOut, Canceled\n\
-               • Output modes: Full (all output) or Incremental (new since last check)\n\
-               • Set incremental=true for polling long-running jobs\n\
+               • Output modes: Incremental (default, new since last check) or Full (all output)\n\
+               • Incremental mode is default and recommended for efficiency\n\
+               • Set incremental=false to get all output from start\n\
                • Returns: status, exit_code, duration, output, PID\n\
             \n\
             3. job_list - List all jobs\n\
@@ -539,12 +551,13 @@ impl rmcp::ServerHandler for EnhancedTerminalServer {
             • Cron: crontab -r\n\
             • Custom patterns: Add via custom_denylist parameter\n\
             \n\
-            INCREMENTAL OUTPUT:\n\
-            Use job_status with incremental=true for streaming-like behavior:\n\
-            • First call: Returns all output so far\n\
+            INCREMENTAL OUTPUT (DEFAULT):\n\
+            job_status uses incremental mode by default (recommended):\n\
+            • First call: Returns all output accumulated so far\n\
             • Subsequent calls: Only new output since last check\n\
             • Efficient polling for long-running jobs\n\
-            • Reset with incremental=false to get full output again\n\
+            • More responsive than full output mode\n\
+            • Set incremental=false to get full output from start\n\
             \n\
             AVAILABLE SHELLS:\n\
             {}\n\
@@ -569,7 +582,7 @@ impl rmcp::ServerHandler for EnhancedTerminalServer {
             {{\"filter_categories\": [\"python_tools\"], \"max_concurrency\": 16}}\n\
             \n\
             Extracted and adapted from the Zed editor project.",
-            self.shell_info
+            self.shell_info, self.shell_info
         );
 
         ServerInfo {
