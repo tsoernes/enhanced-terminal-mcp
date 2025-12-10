@@ -80,6 +80,7 @@ impl JobManager {
     }
 
     /// Register a new job
+    #[allow(dead_code)]
     pub fn register_job(
         &self,
         job_id: String,
@@ -177,6 +178,7 @@ impl JobManager {
     }
 
     /// Reset read position to get all output again
+    #[allow(dead_code)]
     pub fn reset_read_position(&self, job_id: &str) {
         let mut jobs = self.jobs.lock().unwrap();
         if let Some(job) = jobs.get_mut(job_id) {
@@ -236,6 +238,7 @@ impl JobManager {
     }
 
     /// Add tags to an existing job
+    #[allow(dead_code)]
     pub fn add_tags(&self, job_id: &str, tags: Vec<String>) -> Result<()> {
         let mut jobs = self.jobs.lock().unwrap();
         if let Some(job) = jobs.get_mut(job_id) {
@@ -308,6 +311,7 @@ impl JobManager {
     }
 
     /// Delete a job from history
+    #[allow(dead_code)]
     pub fn delete_job(&self, job_id: &str) -> Result<()> {
         let mut jobs = self.jobs.lock().unwrap();
         jobs.remove(job_id)
@@ -316,6 +320,7 @@ impl JobManager {
     }
 
     /// Get clone of jobs Arc for sharing
+    #[allow(dead_code)]
     pub fn jobs_arc(&self) -> Arc<Mutex<HashMap<String, JobRecord>>> {
         Arc::clone(&self.jobs)
     }

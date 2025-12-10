@@ -166,7 +166,7 @@ RETURNS:
     )]
     async fn enhanced_terminal(
         &self,
-        Parameters(mut input): Parameters<TerminalExecutionInput>,
+        Parameters(input): Parameters<TerminalExecutionInput>,
     ) -> Result<CallToolResult, McpError> {
         // Replace {shell_list} placeholder in description with actual shells
         // (Note: This is done at runtime in the description, but we'll handle it in server instructions)
@@ -394,7 +394,7 @@ RETURNS:
         }
 
         if use_pagination {
-            if let (Some(more), Some(total)) = (has_more, total_length) {
+            if let (Some(more), Some(_total)) = (has_more, total_length) {
                 if more {
                     let next_offset = input.offset + output_to_show.len();
                     result_text.push_str(&format!(
