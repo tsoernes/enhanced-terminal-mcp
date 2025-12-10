@@ -29,6 +29,7 @@ pub struct JobRecord {
     pub full_output: String,
     pub truncated: bool,
     pub pid: Option<u32>,
+    pub last_read_position: usize,
 }
 
 /// Global job registry
@@ -78,6 +79,7 @@ impl JobManager {
                 full_output: String::new(),
                 truncated: false,
                 pid,
+                last_read_position: 0,
             },
         );
     }
@@ -114,6 +116,26 @@ impl JobManager {
     pub fn get_job(&self, job_id: &str) -> Option<JobRecord> {
         let jobs = self.jobs.lock().unwrap();
         jobs.get(job_id).cloned()
+    }
+
+    /// Get incremental output (only new since last read)
+    pub fn get_incremental_output(&self, job_id: &str) -> Option<(String, bool)> {
+        let mut jobs = self.jobs.lock().unwrap();
+        if let Some(job) = jobs.get_mut(job_id) {
+            let new_output = job.full_output[job.last_read_position..].to_string();
+            job.last_read_position = job.full_output.len();
+            Some((new_output, matches!(job.status, JobStatus::Running)))
+        } else {
+            None
+        }
+    }
+
+    /// Reset read position to get all output again
+    pub fn reset_read_position(&self, job_id: &str) {
+        let mut jobs = self.jobs.lock().unwrap();
+        if let Some(job) = jobs.get_mut(job_id) {
+            job.last_read_position = 0;
+        }
     }
 
     /// List all jobs

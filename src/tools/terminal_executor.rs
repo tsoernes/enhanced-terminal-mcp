@@ -24,12 +24,15 @@ pub struct TerminalExecutionInput {
     /// Output limit in bytes (default: 16384)
     #[serde(default = "default_output_limit")]
     pub output_limit: usize,
-    /// Timeout in seconds (default: 300)
-    #[serde(default = "default_timeout")]
-    pub timeout_secs: u64,
-    /// Async threshold in seconds - switch to background after this (default: 5)
+    /// Timeout in seconds (None/0 = no timeout, default: None)
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    /// Async threshold in seconds - switch to background after this (default: 50)
     #[serde(default = "default_async_threshold")]
     pub async_threshold_secs: u64,
+    /// Environment variables to set for the command
+    #[serde(default)]
+    pub env_vars: std::collections::HashMap<String, String>,
     /// Force synchronous execution (wait for completion)
     #[serde(default)]
     pub force_sync: bool,
@@ -43,19 +46,15 @@ fn default_cwd() -> String {
 }
 
 fn default_shell() -> String {
-    "sh".to_string()
+    "bash".to_string()
 }
 
 fn default_output_limit() -> usize {
     16 * 1024
 }
 
-fn default_timeout() -> u64 {
-    300
-}
-
 fn default_async_threshold() -> u64 {
-    5
+    50
 }
 
 #[derive(Debug, Serialize)]
@@ -128,6 +127,11 @@ pub fn execute_command(
     cmd.arg(command);
     cmd.cwd(&cwd);
 
+    // Set environment variables
+    for (key, value) in &input.env_vars {
+        cmd.env(key, value);
+    }
+
     // Start the process
     let mut child = pair
         .slave
@@ -154,7 +158,7 @@ pub fn execute_command(
         .map_err(|e| anyhow::anyhow!("Failed to clone reader: {}", e))?;
 
     let output_limit = input.output_limit;
-    let timeout = Duration::from_secs(input.timeout_secs);
+    let timeout = input.timeout_secs.map(Duration::from_secs);
     let async_threshold = Duration::from_secs(input.async_threshold_secs);
     let start_time = Instant::now();
 
@@ -174,11 +178,13 @@ pub fn execute_command(
             break;
         }
 
-        // Check for overall timeout
-        if elapsed > timeout {
-            let _ = child.kill();
-            timed_out = true;
-            break;
+        // Check for overall timeout (if set)
+        if let Some(timeout_duration) = timeout {
+            if elapsed > timeout_duration {
+                let _ = child.kill();
+                timed_out = true;
+                break;
+            }
         }
 
         match reader.read(&mut buffer) {
@@ -208,17 +214,20 @@ pub fn execute_command(
         // Spawn background thread to continue monitoring
         let job_manager_clone = job_manager.clone();
         let job_id_clone = job_id.clone();
-        let timeout_remaining = timeout.saturating_sub(start_time.elapsed());
+        let timeout_remaining = timeout.map(|t| t.saturating_sub(start_time.elapsed()));
 
         thread::spawn(move || {
             let start_bg = Instant::now();
             let mut bg_buffer = [0u8; 4096];
 
             loop {
-                if start_bg.elapsed() > timeout_remaining {
-                    let _ = child.kill();
-                    job_manager_clone.complete_job(&job_id_clone, None, JobStatus::TimedOut);
-                    break;
+                // Check for timeout (if set)
+                if let Some(timeout_dur) = timeout_remaining {
+                    if start_bg.elapsed() > timeout_dur {
+                        let _ = child.kill();
+                        job_manager_clone.complete_job(&job_id_clone, None, JobStatus::TimedOut);
+                        break;
+                    }
                 }
 
                 match reader.read(&mut bg_buffer) {

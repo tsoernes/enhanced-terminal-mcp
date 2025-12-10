@@ -35,6 +35,9 @@ fn default_version_timeout() -> u64 {
 pub struct JobStatusInput {
     /// Job ID to query
     pub job_id: String,
+    /// If true, return only new output since last check (default: false)
+    #[serde(default)]
+    pub incremental: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -91,7 +94,45 @@ impl EnhancedTerminalServer {
     }
 
     #[tool(
-        description = "Execute shell commands with output capture, timeout, and smart async switching. Commands automatically switch to background after async_threshold_secs (default: 5s). Includes denylist protection against dangerous commands."
+        description = "Execute shell commands in a PTY with smart async switching and security.
+
+PARAMETERS:
+- command (string, required): The shell command to execute
+- cwd (string, default: '.'): Working directory for command execution
+- shell (string, default: 'bash'): Shell to use (bash, zsh, fish, sh, etc.)
+- output_limit (number, default: 16384): Maximum output size in bytes
+- timeout_secs (number, default: None): Timeout in seconds (0 or None = no timeout)
+- async_threshold_secs (number, default: 50): Auto-switch to background after this many seconds
+- env_vars (object, default: {}): Environment variables to set (e.g. {\"PATH\": \"/usr/bin\", \"DEBUG\": \"true\"})
+- force_sync (boolean, default: false): Force synchronous execution regardless of duration
+- custom_denylist (array, default: []): Additional dangerous patterns to block
+
+BEHAVIOR:
+- Commands running longer than async_threshold_secs automatically switch to background
+- Returns job_id for tracking via job_status
+- Security denylist blocks dangerous commands (rm -rf /, shutdown, fork bombs, etc.)
+- PTY support preserves colors and terminal features
+- Incremental output captured during background execution
+
+SECURITY:
+- 40+ dangerous patterns blocked by default
+- Custom patterns via custom_denylist parameter
+- No privilege escalation without explicit configuration
+- Output size limits prevent memory exhaustion
+- Timeout protection prevents runaway processes
+
+RETURNS:
+- job_id: Unique identifier for this command execution
+- command: The executed command
+- working_directory: Resolved working directory path
+- exit_code: Exit code (if completed, null if still running)
+- success: Boolean indicating success (if completed)
+- output: Command output (truncated to output_limit for preview)
+- truncated: Boolean indicating if output was truncated
+- timed_out: Boolean indicating if command was killed by timeout
+- switched_to_async: Boolean indicating if command moved to background
+- denied: Boolean indicating if command was blocked
+- denial_reason: Reason for denial (if denied)"
     )]
     async fn enhanced_terminal(
         &self,
@@ -150,11 +191,68 @@ impl EnhancedTerminalServer {
         Ok(CallToolResult::success(vec![Content::text(result_text)]))
     }
 
-    #[tool(description = "Get the status and output of a background job by job ID")]
+    #[tool(description = "Get status and output of a background job.
+
+PARAMETERS:
+- job_id (string, required): The job identifier returned by enhanced_terminal
+- incremental (boolean, default: false): If true, return only new output since last check
+
+BEHAVIOR:
+- Returns current status: Running, Completed, Failed, TimedOut, or Canceled
+- Full output available (up to output_limit)
+- Incremental mode tracks read position per job
+- Duration calculated from start time
+- Exit code available when completed
+
+INCREMENTAL OUTPUT:
+When incremental=true:
+- First call returns all output accumulated so far
+- Subsequent calls return only new output since last check
+- Read position maintained per job_id
+- Useful for polling long-running jobs
+- Reset position by calling with incremental=false
+
+RETURNS:
+- job_id: Job identifier
+- command: The executed command
+- shell: Shell used for execution
+- cwd: Working directory
+- status: Current job status (Running, Completed, Failed, TimedOut, Canceled)
+- exit_code: Exit code (if completed)
+- pid: Process ID (if available)
+- duration: Time elapsed since job start
+- output: Command output (full or incremental based on parameter)
+- truncated: Boolean indicating if output preview was truncated")]
     async fn job_status(
         &self,
         Parameters(input): Parameters<JobStatusInput>,
     ) -> Result<CallToolResult, McpError> {
+        let output_to_show = if input.incremental {
+            // Get incremental output
+            let (new_output, is_running) = self
+                .job_manager
+                .get_incremental_output(&input.job_id)
+                .ok_or_else(|| {
+                McpError::invalid_params("Job not found", None::<serde_json::Value>)
+            })?;
+
+            if new_output.is_empty() && !is_running {
+                return Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Job {} has no new output. Status: Completed.\nUse incremental=false to see all output.",
+                    input.job_id
+                ))]));
+            }
+
+            new_output
+        } else {
+            // Get full output
+            let job = self.job_manager.get_job(&input.job_id).ok_or_else(|| {
+                McpError::invalid_params("Job not found", None::<serde_json::Value>)
+            })?;
+            job.output.clone()
+        };
+
+        // Always get current job info for metadata
         let job = self
             .job_manager
             .get_job(&input.job_id)
@@ -188,17 +286,44 @@ impl EnhancedTerminalServer {
         };
         result_text.push_str(&format!("Duration: {}\n", duration));
 
-        result_text.push_str("\nOutput:\n");
-        result_text.push_str(&job.output);
+        if input.incremental {
+            result_text.push_str(&format!(
+                "Output Mode: Incremental (new since last check)\n"
+            ));
+        } else {
+            result_text.push_str(&format!("Output Mode: Full\n"));
+        }
 
-        if job.truncated {
+        result_text.push_str("\nOutput:\n");
+        result_text.push_str(&output_to_show);
+
+        if job.truncated && !input.incremental {
             result_text.push_str("\n\n[Output truncated - showing first part only]");
         }
 
         Ok(CallToolResult::success(vec![Content::text(result_text)]))
     }
 
-    #[tool(description = "List all background jobs (running and completed)")]
+    #[tool(
+        description = "List all background jobs with status and output previews.
+
+PARAMETERS:
+- max_jobs (number, default: 50): Maximum number of jobs to return
+
+BEHAVIOR:
+- Jobs sorted by start time (newest first)
+- Shows running and completed jobs
+- Output preview limited to first 100 characters
+- Includes duration and exit codes
+
+RETURNS: List of jobs with:
+- job_id: Unique identifier
+- command: Executed command
+- status: Current status (Running, Completed, Failed, TimedOut, Canceled)
+- exit_code: Exit code if completed
+- duration: Time elapsed since start
+- output_preview: First 100 characters of output"
+    )]
     async fn job_list(
         &self,
         Parameters(input): Parameters<JobListInput>,
@@ -250,7 +375,26 @@ impl EnhancedTerminalServer {
         Ok(CallToolResult::success(vec![Content::text(result_text)]))
     }
 
-    #[tool(description = "Cancel a running background job by job ID (Unix only)")]
+    #[tool(
+        description = "Cancel a running background job by sending SIGTERM (Unix only).
+
+PARAMETERS:
+- job_id (string, required): The job identifier to cancel
+
+BEHAVIOR:
+- Sends SIGTERM signal to the process (Unix only)
+- Graceful termination attempt
+- Updates job status to Canceled
+- Works with process groups
+
+PLATFORM SUPPORT:
+- Unix/Linux/macOS: Full support with SIGTERM
+- Windows: Limited support (status update only, no signal)
+
+RETURNS:
+- Confirmation message with job_id
+- Instructions to use job_status to verify cancellation"
+    )]
     async fn job_cancel(
         &self,
         Parameters(input): Parameters<JobCancelInput>,
@@ -268,7 +412,45 @@ impl EnhancedTerminalServer {
     }
 
     #[tool(
-        description = "Detect available developer binaries and their versions (16 concurrent checks)"
+        description = "Detect developer tools and their versions with fast parallel scanning.
+
+PARAMETERS:
+- filter_categories (array, optional): Category names to scan (e.g. [\"rust_tools\", \"python_tools\"])
+- max_concurrency (number, default: 16): Number of concurrent version checks
+- version_timeout_ms (number, default: 1500): Timeout per binary version check in milliseconds
+- include_missing (boolean, default: false): Include binaries not found in PATH
+
+CATEGORIES (100+ tools):
+- package_managers: npm, pip, cargo, dnf, apt, snap, flatpak, brew
+- rust_tools: cargo, rustc, rustfmt, clippy
+- python_tools: python, pip, pytest, black, ruff, mypy
+- build_systems: make, cmake, ninja, gradle, maven
+- c_cpp_tools: gcc, g++, clang, gdb, lldb
+- java_jvm_tools: java, javac, kotlin
+- node_js_tools: node, deno, bun, npm, yarn
+- go_tools: go, gofmt
+- editors_dev: vim, nvim, emacs, code, zed
+- search_productivity: rg, fd, fzf, jq, bat, tree, exa
+- system_perf: htop, ps, top, df, du
+- containers: docker, podman, kubectl, helm
+- networking: curl, wget, dig, traceroute
+- security: openssl, gpg, ssh-keygen
+- databases: sqlite3, psql, mysql, redis-cli
+- vcs: git, gh
+
+PERFORMANCE:
+- 16 concurrent checks by default
+- ~2-3 seconds for all categories
+- Configurable timeout per binary
+- Efficient PATH scanning
+
+RETURNS: JSON array of binaries with:
+- name: Binary name
+- category: Category identifier
+- found: Boolean indicating if binary exists
+- path: Full path (or paths separated by ';' if multiple)
+- version: Version string (if detected)
+- error: Error message (if version detection failed)"
     )]
     async fn detect_binaries(
         &self,
@@ -296,50 +478,95 @@ impl EnhancedTerminalServer {
 impl rmcp::ServerHandler for EnhancedTerminalServer {
     fn get_info(&self) -> ServerInfo {
         let instructions = format!(
-            "Enhanced terminal MCP server with command execution, job management, and binary detection.\n\
+            "Enhanced Terminal MCP Server - Production-ready command execution with job management.\n\
             \n\
-            Tools:\n\
-            - enhanced_terminal: Execute shell commands with PTY support, output capture, and smart async switching\n\
-              * Automatically switches to background after 5 seconds (configurable via async_threshold_secs)\n\
-              * Set force_sync=true to wait for completion regardless of duration\n\
-              * Includes denylist protection against dangerous commands\n\
-              * Default timeout: 300 seconds\n\
-              * Output limit: 16KB (configurable)\n\
-            - job_status: Check status and get output of background jobs\n\
-            - job_list: List all jobs (running and completed)\n\
-            - job_cancel: Cancel a running background job (Unix only)\n\
-            - detect_binaries: Detect developer tools with 16 concurrent checks\n\
+            CORE FEATURES:\n\
+            • Smart async switching: Commands auto-background after 50s (configurable)\n\
+            • Job management: Full tracking, status, output streaming, cancellation\n\
+            • Security: 40+ dangerous patterns blocked by default\n\
+            • Performance: 16 concurrent binary detection\n\
+            • Environment: Full env var support, PTY terminal emulation\n\
             \n\
-            Smart Async Behavior:\n\
-            Commands that run longer than async_threshold_secs (default: 5s) automatically switch to\n\
-            background execution and return immediately with a job ID. Use job_status to check progress.\n\
+            TOOLS:\n\
             \n\
-            Security:\n\
-            Dangerous commands are blocked by default denylist including:\n\
-            - Destructive operations: rm -rf /, mkfs, dd if=/dev/zero\n\
-            - System manipulation: shutdown, reboot, chmod 777 /\n\
-            - Fork bombs and resource exhaustion\n\
-            - Custom patterns can be added via custom_denylist parameter\n\
+            1. enhanced_terminal - Execute shell commands\n\
+               • Default shell: bash (configurable: bash, zsh, fish, sh)\n\
+               • Smart async: Auto-background after 50s (async_threshold_secs)\n\
+               • No timeout by default (timeout_secs: 0 or None)\n\
+               • Environment variables: Set via env_vars parameter\n\
+               • Security: Denylist blocks rm -rf /, shutdown, fork bombs, etc.\n\
+               • Output: 16KB limit (configurable), captured incrementally\n\
+               • Returns: job_id for tracking background execution\n\
             \n\
-            Binary Categories (16 concurrent checks):\n\
-            - package_managers (npm, pip, cargo, dnf, apt, snap, flatpak, brew)\n\
-            - rust_tools (cargo, rustc, rustfmt, clippy)\n\
-            - python_tools (python, pip, pytest, black, ruff, mypy)\n\
-            - build_systems (make, cmake, ninja, gradle, maven)\n\
-            - c_cpp_tools (gcc, g++, clang, gdb, lldb)\n\
-            - java_jvm_tools (java, javac, kotlin)\n\
-            - node_js_tools (node, deno, bun, npm, yarn)\n\
-            - go_tools (go, gofmt)\n\
-            - editors_dev (vim, nvim, emacs, code, zed)\n\
-            - search_productivity (rg, fd, fzf, jq, bat, tree, exa)\n\
-            - system_perf (htop, ps, top, df, du)\n\
-            - containers (docker, podman, kubectl, helm)\n\
-            - networking (curl, wget, dig, traceroute)\n\
-            - security (openssl, gpg, ssh-keygen)\n\
-            - databases (sqlite3, psql, mysql, redis-cli)\n\
-            - vcs (git, gh)\n\
+            2. job_status - Monitor background jobs\n\
+               • Get current status: Running, Completed, Failed, TimedOut, Canceled\n\
+               • Output modes: Full (all output) or Incremental (new since last check)\n\
+               • Set incremental=true for polling long-running jobs\n\
+               • Returns: status, exit_code, duration, output, PID\n\
             \n\
+            3. job_list - List all jobs\n\
+               • Shows recent jobs (newest first)\n\
+               • Configurable limit (default: 50)\n\
+               • Quick overview with output previews\n\
+               • Filter by status if needed\n\
+            \n\
+            4. job_cancel - Cancel running jobs\n\
+               • Sends SIGTERM (Unix/Linux/macOS only)\n\
+               • Graceful process termination\n\
+               • Updates job status to Canceled\n\
+            \n\
+            5. detect_binaries - Fast tool detection\n\
+               • Scans 100+ developer tools across 16 categories\n\
+               • 16 concurrent checks (~2-3 seconds total)\n\
+               • Filter by category for targeted detection\n\
+               • Returns: paths, versions, availability\n\
+            \n\
+            SMART ASYNC:\n\
+            Commands exceeding async_threshold_secs (default: 50s) automatically move to background.\n\
+            Returns immediately with job_id. Use job_status with incremental=true to poll for updates.\n\
+            Set force_sync=true to wait for completion regardless of duration.\n\
+            \n\
+            ENVIRONMENT VARIABLES:\n\
+            Set environment variables via env_vars parameter:\n\
+            {{\"PATH\": \"/custom/path\", \"DEBUG\": \"true\", \"NODE_ENV\": \"production\"}}\n\
+            \n\
+            SECURITY DENYLIST:\n\
+            Blocks dangerous patterns (40+ default):\n\
+            • Destructive: rm -rf /, mkfs, dd if=/dev/zero, > /dev/sda\n\
+            • System: shutdown, reboot, halt, chmod 777 /, chown -R root\n\
+            • Exhaustion: fork bombs (:(){{:|:&}};:), infinite loops\n\
+            • Kernel: rmmod, insmod, modprobe\n\
+            • Cron: crontab -r\n\
+            • Custom patterns: Add via custom_denylist parameter\n\
+            \n\
+            INCREMENTAL OUTPUT:\n\
+            Use job_status with incremental=true for streaming-like behavior:\n\
+            • First call: Returns all output so far\n\
+            • Subsequent calls: Only new output since last check\n\
+            • Efficient polling for long-running jobs\n\
+            • Reset with incremental=false to get full output again\n\
+            \n\
+            AVAILABLE SHELLS:\n\
             {}\n\
+            \n\
+            BINARY CATEGORIES:\n\
+            package_managers, rust_tools, python_tools, build_systems, c_cpp_tools,\n\
+            java_jvm_tools, node_js_tools, go_tools, editors_dev, search_productivity,\n\
+            system_perf, containers, networking, security, databases, vcs\n\
+            \n\
+            EXAMPLES:\n\
+            \n\
+            Quick command:\n\
+            {{\"command\": \"ls -la\", \"cwd\": \".\" }}\n\
+            \n\
+            Long-running with env vars:\n\
+            {{\"command\": \"npm install\", \"env_vars\": {{\"NODE_ENV\": \"production\"}}, \"async_threshold_secs\": 30}}\n\
+            \n\
+            Monitor job:\n\
+            {{\"job_id\": \"job-123\", \"incremental\": true}}\n\
+            \n\
+            Detect Python tools:\n\
+            {{\"filter_categories\": [\"python_tools\"], \"max_concurrency\": 16}}\n\
             \n\
             Extracted and adapted from the Zed editor project.",
             self.shell_info

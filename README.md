@@ -94,20 +94,28 @@ Basic synchronous execution (completes quickly):
 {
   "command": "ls -la",
   "cwd": ".",
-  "shell": "bash",
-  "output_limit": 16384,
-  "timeout_secs": 300
+  "shell": "bash"
 }
 ```
 
-Long-running command (auto-switches to background after 5 seconds):
+Long-running command (auto-switches to background after 50 seconds):
 ```json
 {
   "command": "npm install",
   "cwd": "./my-project",
   "shell": "bash",
-  "async_threshold_secs": 5,
-  "timeout_secs": 600
+  "async_threshold_secs": 50
+}
+```
+
+With environment variables:
+```json
+{
+  "command": "npm run build",
+  "env_vars": {
+    "NODE_ENV": "production",
+    "API_KEY": "secret123"
+  }
 }
 ```
 
@@ -115,24 +123,34 @@ Force synchronous execution (wait for completion):
 ```json
 {
   "command": "cargo build --release",
-  "force_sync": true,
-  "timeout_secs": 1800
+  "force_sync": true
 }
 ```
 
-With custom denylist:
+With timeout and custom denylist:
 ```json
 {
   "command": "docker run myimage",
+  "timeout_secs": 600,
   "custom_denylist": ["docker rm", "docker system prune"]
 }
 ```
 
 #### job_status
 
+Get full output:
 ```json
 {
-  "job_id": "job-123"
+  "job_id": "job-123",
+  "incremental": false
+}
+```
+
+Get incremental output (only new since last check):
+```json
+{
+  "job_id": "job-123",
+  "incremental": true
 }
 ```
 
@@ -255,12 +273,22 @@ You can add custom patterns via the `custom_denylist` parameter:
 
 ### Async Threshold
 
-Commands that exceed `async_threshold_secs` (default: 5 seconds) automatically switch to background execution. This prevents:
+Commands that exceed `async_threshold_secs` (default: 50 seconds) automatically switch to background execution. This prevents:
 - Long-running commands from blocking the MCP server
 - Timeout issues with package installations
 - Slow build processes hanging the interface
 
 Set `force_sync: true` to disable this behavior for specific commands.
+
+### Incremental Output
+
+Use `job_status` with `incremental: true` for efficient polling of long-running jobs:
+- First call returns all output accumulated so far
+- Subsequent calls return only new output since last check
+- Read position tracked per job_id
+- Reset by calling with `incremental: false`
+
+This enables streaming-like behavior without actual streaming infrastructure.
 
 ## Architecture
 
@@ -269,7 +297,7 @@ This server uses a modular structure with Rust 2024 edition:
 - `src/main.rs` - Entry point and server initialization
 - `src/server.rs` - MCP server implementation with tool handlers
 - `src/detection/` - Binary and shell detection logic
-- `src/tools/` - Terminal execution implementation
+- `src/tools/` - Terminal execution, job management, security denylist
 
 ### Dependencies
 
@@ -283,10 +311,22 @@ This server uses a modular structure with Rust 2024 edition:
 
 ### Performance
 
-- **16 concurrent binary checks** - Fast parallel tool detection
-- **Smart async switching** - Prevents blocking on long operations
+- **16 concurrent binary checks** - Fast parallel tool detection (configurable)
+- **Smart async switching** - Auto-background after 50s (configurable)
 - **Thread-based job execution** - Efficient background task management
-- **Incremental output capture** - Memory-efficient streaming
+- **Incremental output capture** - Memory-efficient streaming with read position tracking
+- **No timeout by default** - Set timeout_secs to enable (0 or None = no timeout)
+
+## Configuration
+
+### Default Values
+
+- **Shell**: `bash` (was: `sh`)
+- **Async Threshold**: `50` seconds (was: `5`)
+- **Timeout**: `None` (no timeout by default, was: `300`)
+- **Output Limit**: `16384` bytes (16KB)
+- **Max Concurrency**: `16` (was: `12`)
+- **Version Timeout**: `1500` ms
 
 ## License
 
