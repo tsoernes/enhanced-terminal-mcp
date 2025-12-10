@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Job Tags and Metadata**: Enhanced job tracking with rich metadata
+  - Add custom tags to jobs via `tags` parameter in `enhanced_terminal`
+  - Automatic command summary generation (first 100 chars)
+  - Tags displayed in `job_status` and `job_list` outputs
+  - Example: `{"command": "cargo build", "tags": ["build", "release"]}`
+- **Job Filtering**: Advanced filtering in `job_list` tool
+  - Filter by status: `status_filter` (e.g., ["Running", "Completed"])
+  - Filter by tag: `tag_filter` (e.g., "build")
+  - Filter by working directory: `cwd_filter`
+  - Sort order: `sort_order` ("newest" or "oldest")
+  - All filters can be combined with AND logic
+- **Output Pagination**: Seek into specific byte ranges of job output
+  - New `offset` parameter: starting byte position (default: 0)
+  - New `limit` parameter: maximum bytes to return (default: 0 = all)
+  - Returns `has_more` flag indicating if more data available
+  - Returns `total_length` for overall output size
+  - Useful for very long logs without retrieving full output
+  - Three modes: incremental (default), full, and paginated
 - **Incremental Output**: `job_status` now supports `incremental` parameter
   - Returns only new output since last check when `incremental: true`
   - First call returns all accumulated output

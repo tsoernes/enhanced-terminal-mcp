@@ -2,10 +2,10 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 /// Job status for background command execution
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum JobStatus {
     Running,
     Completed,
@@ -30,6 +30,31 @@ pub struct JobRecord {
     pub truncated: bool,
     pub pid: Option<u32>,
     pub last_read_position: usize,
+    /// Optional tags for categorizing jobs (e.g., ["build", "ci"])
+    pub tags: Vec<String>,
+    /// Command summary (first N characters)
+    pub summary: String,
+}
+
+impl JobRecord {
+    /// Get duration of the job (elapsed or total if finished)
+    pub fn duration(&self) -> Option<Duration> {
+        let end_time = self.finished_at.unwrap_or_else(SystemTime::now);
+        end_time.duration_since(self.started_at).ok()
+    }
+
+    /// Get duration as formatted string
+    pub fn duration_string(&self) -> String {
+        self.duration()
+            .map(|d| {
+                if self.finished_at.is_some() {
+                    format!("{:.2}s", d.as_secs_f64())
+                } else {
+                    format!("{:.2}s (running)", d.as_secs_f64())
+                }
+            })
+            .unwrap_or_else(|| "unknown".to_string())
+    }
 }
 
 /// Global job registry
@@ -63,6 +88,25 @@ impl JobManager {
         cwd: String,
         pid: Option<u32>,
     ) {
+        self.register_job_with_tags(job_id, command, shell, cwd, pid, Vec::new());
+    }
+
+    /// Register a new job with tags
+    pub fn register_job_with_tags(
+        &self,
+        job_id: String,
+        command: String,
+        shell: String,
+        cwd: String,
+        pid: Option<u32>,
+        tags: Vec<String>,
+    ) {
+        let summary = if command.len() > 100 {
+            format!("{}...", &command[..97])
+        } else {
+            command.clone()
+        };
+
         let mut jobs = self.jobs.lock().unwrap();
         jobs.insert(
             job_id.clone(),
@@ -80,6 +124,8 @@ impl JobManager {
                 truncated: false,
                 pid,
                 last_read_position: 0,
+                tags,
+                summary,
             },
         );
     }
@@ -144,6 +190,87 @@ impl JobManager {
         let mut job_list: Vec<JobRecord> = jobs.values().cloned().collect();
         job_list.sort_by(|a, b| b.started_at.cmp(&a.started_at));
         job_list
+    }
+
+    /// List jobs with filtering options
+    pub fn list_jobs_filtered(
+        &self,
+        status_filter: Option<&[JobStatus]>,
+        tag_filter: Option<&str>,
+        cwd_filter: Option<&str>,
+    ) -> Vec<JobRecord> {
+        let jobs = self.jobs.lock().unwrap();
+        let mut job_list: Vec<JobRecord> =
+            jobs.values()
+                .filter(|job| {
+                    // Filter by status
+                    if let Some(statuses) = status_filter {
+                        if !statuses.iter().any(|s| {
+                            std::mem::discriminant(s) == std::mem::discriminant(&job.status)
+                        }) {
+                            return false;
+                        }
+                    }
+
+                    // Filter by tag
+                    if let Some(tag) = tag_filter {
+                        if !job.tags.iter().any(|t| t == tag) {
+                            return false;
+                        }
+                    }
+
+                    // Filter by cwd
+                    if let Some(cwd) = cwd_filter {
+                        if job.cwd != cwd {
+                            return false;
+                        }
+                    }
+
+                    true
+                })
+                .cloned()
+                .collect();
+
+        job_list.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        job_list
+    }
+
+    /// Add tags to an existing job
+    pub fn add_tags(&self, job_id: &str, tags: Vec<String>) -> Result<()> {
+        let mut jobs = self.jobs.lock().unwrap();
+        if let Some(job) = jobs.get_mut(job_id) {
+            for tag in tags {
+                if !job.tags.contains(&tag) {
+                    job.tags.push(tag);
+                }
+            }
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Job not found"))
+        }
+    }
+
+    /// Get output with pagination (offset and limit)
+    pub fn get_output_range(
+        &self,
+        job_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Option<(String, bool, usize)> {
+        let jobs = self.jobs.lock().unwrap();
+        if let Some(job) = jobs.get(job_id) {
+            let total_len = job.full_output.len();
+            let end = (offset + limit).min(total_len);
+            let output_slice = if offset < total_len {
+                job.full_output[offset..end].to_string()
+            } else {
+                String::new()
+            };
+            let has_more = end < total_len;
+            Some((output_slice, has_more, total_len))
+        } else {
+            None
+        }
     }
 
     /// Cancel a running job (Unix only)

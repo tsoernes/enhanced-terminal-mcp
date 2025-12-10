@@ -37,9 +37,12 @@ A standalone Model Context Protocol (MCP) server that provides terminal executio
 
 ### Key Features
 
-- **Smart Async Switching**: Commands automatically move to background after 5 seconds (configurable)
+- **Smart Async Switching**: Commands automatically move to background after 50 seconds (configurable)
 - **Security Denylist**: Blocks dangerous commands like `rm -rf /`, `shutdown`, fork bombs, etc.
-- **Job Management**: Track, monitor, and cancel background jobs
+- **Job Management**: Track, monitor, and cancel background jobs with rich metadata
+- **Job Filtering**: Filter jobs by status, tags, or working directory
+- **Output Pagination**: Seek into specific byte ranges of very long logs
+- **Job Tags**: Categorize jobs with custom tags for easy filtering
 - **16 Concurrent Checks**: Fast parallel binary detection
 - **PTY Support**: Full terminal emulation for interactive commands
 
@@ -136,6 +139,14 @@ With timeout and custom denylist:
 }
 ```
 
+With tags for job categorization:
+```json
+{
+  "command": "cargo build --release",
+  "tags": ["build", "release"]
+}
+```
+
 #### job_status
 
 Get full output:
@@ -154,11 +165,64 @@ Get incremental output (only new since last check):
 }
 ```
 
+Get paginated output (first 1000 bytes):
+```json
+{
+  "job_id": "job-123",
+  "offset": 0,
+  "limit": 1000
+}
+```
+
+Get paginated output (next 1000 bytes):
+```json
+{
+  "job_id": "job-123",
+  "offset": 1000,
+  "limit": 1000
+}
+```
+
 #### job_list
 
+List all jobs:
 ```json
 {
   "max_jobs": 50
+}
+```
+
+Filter by status:
+```json
+{
+  "max_jobs": 50,
+  "status_filter": ["Running", "Completed"]
+}
+```
+
+Filter by tag:
+```json
+{
+  "max_jobs": 50,
+  "tag_filter": "build"
+}
+```
+
+Filter by working directory:
+```json
+{
+  "max_jobs": 50,
+  "cwd_filter": "/home/user/project"
+}
+```
+
+Combined filters with sort order:
+```json
+{
+  "max_jobs": 50,
+  "status_filter": ["Completed"],
+  "tag_filter": "test",
+  "sort_order": "oldest"
 }
 ```
 
@@ -289,6 +353,42 @@ Use `job_status` with `incremental: true` for efficient polling of long-running 
 - Reset by calling with `incremental: false`
 
 This enables streaming-like behavior without actual streaming infrastructure.
+
+### Output Pagination
+
+For very long outputs, use pagination mode in `job_status`:
+- Set `offset` to starting byte position
+- Set `limit` to number of bytes to return (0 = all remaining)
+- Returns `has_more` flag and `total_length`
+- Allows seeking into specific segments without retrieving full output
+
+Example workflow:
+```json
+// Get first 1000 bytes
+{"job_id": "job-123", "offset": 0, "limit": 1000}
+// Get next 1000 bytes
+{"job_id": "job-123", "offset": 1000, "limit": 1000}
+// Get all remaining
+{"job_id": "job-123", "offset": 2000, "limit": 0}
+```
+
+### Job Tags and Filtering
+
+Tag jobs when creating them for easier organization:
+```json
+{
+  "command": "cargo test",
+  "tags": ["test", "ci"]
+}
+```
+
+Filter jobs by various criteria in `job_list`:
+- **status_filter**: Match specific statuses (e.g., ["Running", "Completed"])
+- **tag_filter**: Show only jobs with a specific tag
+- **cwd_filter**: Show only jobs from a specific directory
+- **sort_order**: "newest" (default) or "oldest"
+
+All filters can be combined for powerful queries.
 
 ## Architecture
 

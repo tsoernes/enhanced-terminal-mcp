@@ -39,6 +39,9 @@ pub struct TerminalExecutionInput {
     /// Custom denylist patterns (in addition to defaults)
     #[serde(default)]
     pub custom_denylist: Vec<String>,
+    /// Optional tags for categorizing jobs (e.g., ["build", "ci"])
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 fn default_cwd() -> String {
@@ -145,12 +148,13 @@ pub fn execute_command(
 
     // Register job
     let job_id = job_manager.new_job_id();
-    job_manager.register_job(
+    job_manager.register_job_with_tags(
         job_id.clone(),
         command.to_string(),
         input.shell.clone(),
         cwd.display().to_string(),
         pid,
+        input.tags.clone(),
     );
 
     // Read output with smart async switching

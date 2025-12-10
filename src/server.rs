@@ -38,6 +38,12 @@ pub struct JobStatusInput {
     /// If true, return only new output since last check (default: true)
     #[serde(default = "default_incremental")]
     pub incremental: bool,
+    /// Offset for pagination (bytes into output, default: 0)
+    #[serde(default)]
+    pub offset: usize,
+    /// Limit for pagination (bytes to return, default: 0 = all)
+    #[serde(default)]
+    pub limit: usize,
 }
 
 fn default_incremental() -> bool {
@@ -49,10 +55,26 @@ pub struct JobListInput {
     /// Maximum number of jobs to return (default: 50)
     #[serde(default = "default_max_jobs")]
     pub max_jobs: usize,
+    /// Filter by job status (e.g., ["Running", "Completed"])
+    #[serde(default)]
+    pub status_filter: Option<Vec<String>>,
+    /// Filter by tag (e.g., "build")
+    #[serde(default)]
+    pub tag_filter: Option<String>,
+    /// Filter by working directory
+    #[serde(default)]
+    pub cwd_filter: Option<String>,
+    /// Sort order: "newest" (default) or "oldest"
+    #[serde(default = "default_sort_order")]
+    pub sort_order: String,
 }
 
 fn default_max_jobs() -> usize {
     50
+}
+
+fn default_sort_order() -> String {
+    "newest".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -110,6 +132,7 @@ PARAMETERS:
 - env_vars (object, default: {}): Environment variables to set (e.g. {\"PATH\": \"/usr/bin\", \"DEBUG\": \"true\"})
 - force_sync (boolean, default: false): Force synchronous execution regardless of duration
 - custom_denylist (array, default: []): Additional dangerous patterns to block
+- tags (array, default: []): Optional tags for categorizing jobs (e.g., [\"build\", \"ci\"])
 
 AVAILABLE SHELLS:
 {shell_list}
@@ -218,6 +241,8 @@ RETURNS:
 PARAMETERS:
 - job_id (string, required): The job identifier returned by enhanced_terminal
 - incremental (boolean, default: true): If true, return only new output since last check (RECOMMENDED)
+- offset (number, default: 0): Starting byte position for pagination
+- limit (number, default: 0): Maximum bytes to return (0 = all)
 
 BEHAVIOR:
 - Returns current status: Running, Completed, Failed, TimedOut, or Canceled
@@ -225,6 +250,7 @@ BEHAVIOR:
 - Incremental mode tracks read position per job
 - Duration calculated from start time
 - Exit code available when completed
+- Supports three output modes: incremental, full, and paginated
 
 INCREMENTAL OUTPUT (DEFAULT):
 When incremental=true (default, recommended):
@@ -235,22 +261,55 @@ When incremental=true (default, recommended):
 - More responsive than full output mode
 - Reset position by calling with incremental=false to get all output again
 
+PAGINATION MODE:
+When offset > 0 or limit > 0:
+- Returns specific byte range of output
+- offset: Starting position in bytes
+- limit: Number of bytes to return (0 = all remaining)
+- Returns has_more flag indicating if more data available
+- Returns total_length for overall output size
+- Useful for seeking into very long logs
+- Can re-read specific segments without full retrieval
+
 RETURNS:
 - job_id: Job identifier
 - command: The executed command
+- summary: First 100 characters of command
 - shell: Shell used for execution
 - cwd: Working directory
 - status: Current job status (Running, Completed, Failed, TimedOut, Canceled)
 - exit_code: Exit code (if completed)
 - pid: Process ID (if available)
 - duration: Time elapsed since job start
-- output: Command output (full or incremental based on parameter)
-- truncated: Boolean indicating if output preview was truncated")]
+- tags: Optional tags assigned to job
+- output: Command output (full, incremental, or paginated based on parameters)
+- truncated: Boolean indicating if output preview was truncated
+- (pagination only) has_more: Boolean indicating if more data available
+- (pagination only) total_length: Total output size in bytes")]
     async fn job_status(
         &self,
         Parameters(input): Parameters<JobStatusInput>,
     ) -> Result<CallToolResult, McpError> {
-        let output_to_show = if input.incremental {
+        // Determine if pagination is requested
+        let use_pagination = input.offset > 0 || input.limit > 0;
+
+        let (output_to_show, has_more, total_length) = if use_pagination {
+            // Use pagination
+            let limit = if input.limit == 0 {
+                usize::MAX
+            } else {
+                input.limit
+            };
+
+            let (output, has_more, total) = self
+                .job_manager
+                .get_output_range(&input.job_id, input.offset, limit)
+                .ok_or_else(|| {
+                    McpError::invalid_params("Job not found", None::<serde_json::Value>)
+                })?;
+
+            (output, Some(has_more), Some(total))
+        } else if input.incremental {
             // Get incremental output
             let (new_output, is_running) = self
                 .job_manager
@@ -266,13 +325,13 @@ RETURNS:
                 ))]));
             }
 
-            new_output
+            (new_output, None, None)
         } else {
             // Get full output
             let job = self.job_manager.get_job(&input.job_id).ok_or_else(|| {
                 McpError::invalid_params("Job not found", None::<serde_json::Value>)
             })?;
-            job.output.clone()
+            (job.output.clone(), None, None)
         };
 
         // Always get current job info for metadata
@@ -283,23 +342,17 @@ RETURNS:
 
         let mut result_text = format!("Job ID: {}\n", job.job_id);
         result_text.push_str(&format!("Command: {}\n", job.command));
+        result_text.push_str(&format!("Summary: {}\n", job.summary));
         result_text.push_str(&format!("Shell: {}\n", job.shell));
         result_text.push_str(&format!("Working Directory: {}\n", job.cwd));
         result_text.push_str(&format!("Status: {:?}\n", job.status));
 
-        // Calculate and display duration
-        let duration = if let Some(finished) = job.finished_at {
-            finished
-                .duration_since(job.started_at)
-                .map(|d| format!("{:.2}s", d.as_secs_f64()))
-                .unwrap_or_else(|_| "unknown".to_string())
-        } else {
-            std::time::SystemTime::now()
-                .duration_since(job.started_at)
-                .map(|d| format!("{:.2}s (running)", d.as_secs_f64()))
-                .unwrap_or_else(|_| "unknown".to_string())
-        };
-        result_text.push_str(&format!("Duration: {}\n", duration));
+        if !job.tags.is_empty() {
+            result_text.push_str(&format!("Tags: {}\n", job.tags.join(", ")));
+        }
+
+        // Use the duration helper method
+        result_text.push_str(&format!("Duration: {}\n", job.duration_string()));
 
         if let Some(exit_code) = job.exit_code {
             result_text.push_str(&format!("Exit Code: {}\n", exit_code));
@@ -309,7 +362,23 @@ RETURNS:
             result_text.push_str(&format!("PID: {}\n", pid));
         }
 
-        if input.incremental {
+        if use_pagination {
+            result_text.push_str(&format!(
+                "Output Mode: Paginated (offset: {}, limit: {})\n",
+                input.offset,
+                if input.limit == 0 {
+                    "all".to_string()
+                } else {
+                    input.limit.to_string()
+                }
+            ));
+            if let Some(total) = total_length {
+                result_text.push_str(&format!("Total Output Length: {} bytes\n", total));
+            }
+            if let Some(more) = has_more {
+                result_text.push_str(&format!("Has More: {}\n", more));
+            }
+        } else if input.incremental {
             result_text.push_str(&format!(
                 "Output Mode: Incremental (new since last check)\n"
             ));
@@ -320,8 +389,20 @@ RETURNS:
         result_text.push_str("\nOutput:\n");
         result_text.push_str(&output_to_show);
 
-        if job.truncated && !input.incremental {
+        if job.truncated && !input.incremental && !use_pagination {
             result_text.push_str("\n\n[Output truncated - showing first part only]");
+        }
+
+        if use_pagination {
+            if let (Some(more), Some(total)) = (has_more, total_length) {
+                if more {
+                    let next_offset = input.offset + output_to_show.len();
+                    result_text.push_str(&format!(
+                        "\n\n[More output available. Next offset: {}]",
+                        next_offset
+                    ));
+                }
+            }
         }
 
         Ok(CallToolResult::success(vec![Content::text(result_text)]))
@@ -332,26 +413,76 @@ RETURNS:
 
 PARAMETERS:
 - max_jobs (number, default: 50): Maximum number of jobs to return
+- status_filter (array, optional): Filter by status (e.g., [\"Running\", \"Completed\"])
+- tag_filter (string, optional): Filter by tag (e.g., \"build\")
+- cwd_filter (string, optional): Filter by working directory
+- sort_order (string, default: \"newest\"): Sort order (\"newest\" or \"oldest\")
 
 BEHAVIOR:
-- Jobs sorted by start time (newest first)
+- Jobs sorted by start time (newest first by default)
 - Shows running and completed jobs
 - Output preview limited to first 100 characters
-- Includes duration and exit codes
+- Includes duration, exit codes, tags, and summary
+
+FILTERING:
+- status_filter: Match any of the provided statuses
+  - Valid values: \"Running\", \"Completed\", \"Failed\", \"TimedOut\", \"Canceled\"
+- tag_filter: Show only jobs with the specified tag
+- cwd_filter: Show only jobs from a specific directory
+- Filters are combined with AND logic
 
 RETURNS: List of jobs with:
 - job_id: Unique identifier
-- command: Executed command
+- command: Full executed command
+- summary: First 100 characters of command
 - status: Current status (Running, Completed, Failed, TimedOut, Canceled)
 - exit_code: Exit code if completed
 - duration: Time elapsed since start
+- tags: Optional tags assigned to this job
+- cwd: Working directory
+- shell: Shell used
 - output_preview: First 100 characters of output"
     )]
     async fn job_list(
         &self,
         Parameters(input): Parameters<JobListInput>,
     ) -> Result<CallToolResult, McpError> {
-        let jobs = self.job_manager.list_jobs();
+        use crate::tools::JobStatus;
+
+        // Parse status filter if provided
+        let status_filter: Option<Vec<JobStatus>> = input.status_filter.as_ref().map(|filters| {
+            filters
+                .iter()
+                .filter_map(|s| match s.as_str() {
+                    "Running" => Some(JobStatus::Running),
+                    "Completed" => Some(JobStatus::Completed),
+                    "Failed" => Some(JobStatus::Failed),
+                    "TimedOut" => Some(JobStatus::TimedOut),
+                    "Canceled" => Some(JobStatus::Canceled),
+                    _ => None,
+                })
+                .collect()
+        });
+
+        // Get filtered jobs
+        let mut jobs = if input.status_filter.is_some()
+            || input.tag_filter.is_some()
+            || input.cwd_filter.is_some()
+        {
+            self.job_manager.list_jobs_filtered(
+                status_filter.as_deref(),
+                input.tag_filter.as_deref(),
+                input.cwd_filter.as_deref(),
+            )
+        } else {
+            self.job_manager.list_jobs()
+        };
+
+        // Apply sort order
+        if input.sort_order == "oldest" {
+            jobs.reverse();
+        }
+
         let jobs_to_show = jobs.into_iter().take(input.max_jobs).collect::<Vec<_>>();
 
         if jobs_to_show.is_empty() {
@@ -364,26 +495,21 @@ RETURNS: List of jobs with:
 
         for job in jobs_to_show {
             result_text.push_str(&format!("Job ID: {}\n", job.job_id));
-            result_text.push_str(&format!("  Command: {}\n", job.command));
+            result_text.push_str(&format!("  Summary: {}\n", job.summary));
             result_text.push_str(&format!("  Status: {:?}\n", job.status));
+            result_text.push_str(&format!("  CWD: {}\n", job.cwd));
+            result_text.push_str(&format!("  Shell: {}\n", job.shell));
+
+            if !job.tags.is_empty() {
+                result_text.push_str(&format!("  Tags: {}\n", job.tags.join(", ")));
+            }
 
             if let Some(exit_code) = job.exit_code {
                 result_text.push_str(&format!("  Exit Code: {}\n", exit_code));
             }
 
-            // Calculate duration
-            let duration = if let Some(finished) = job.finished_at {
-                finished
-                    .duration_since(job.started_at)
-                    .map(|d| format!("{:.2}s", d.as_secs_f64()))
-                    .unwrap_or_else(|_| "unknown".to_string())
-            } else {
-                std::time::SystemTime::now()
-                    .duration_since(job.started_at)
-                    .map(|d| format!("{:.2}s (running)", d.as_secs_f64()))
-                    .unwrap_or_else(|_| "unknown".to_string())
-            };
-            result_text.push_str(&format!("  Duration: {}\n", duration));
+            // Use the duration helper method
+            result_text.push_str(&format!("  Duration: {}\n", job.duration_string()));
 
             // Show output preview (first 100 chars)
             let preview = if job.output.len() > 100 {
