@@ -70,6 +70,7 @@ pub struct ExecutionResult {
     pub switched_to_async: bool,
     pub denied: bool,
     pub denial_reason: Option<String>,
+    pub duration_secs: Option<f64>,
 }
 
 pub fn execute_command(
@@ -100,6 +101,7 @@ pub fn execute_command(
                 "Command denied by security policy. Matched pattern: {}",
                 matched_pattern.unwrap_or_else(|| "unknown".to_string())
             )),
+            duration_secs: None,
         });
     }
 
@@ -259,8 +261,9 @@ pub fn execute_command(
             }
         });
 
-        // Return with current output
+        // Return with current output and duration so far
         let output_str = String::from_utf8_lossy(&output).to_string();
+        let duration_secs = start_time.elapsed().as_secs_f64();
         return Ok(ExecutionResult {
             job_id,
             command: command.to_string(),
@@ -273,6 +276,7 @@ pub fn execute_command(
             switched_to_async: true,
             denied: false,
             denial_reason: None,
+            duration_secs: Some(duration_secs),
         });
     }
 
@@ -293,6 +297,8 @@ pub fn execute_command(
     };
     job_manager.complete_job(&job_id, exit_code, status);
 
+    let duration_secs = start_time.elapsed().as_secs_f64();
+
     Ok(ExecutionResult {
         job_id,
         command: command.to_string(),
@@ -305,5 +311,6 @@ pub fn execute_command(
         switched_to_async: false,
         denied: false,
         denial_reason: None,
+        duration_secs: Some(duration_secs),
     })
 }

@@ -169,6 +169,10 @@ RETURNS:
             result.working_directory
         ));
 
+        if let Some(duration) = result.duration_secs {
+            result_text.push_str(&format!("Duration: {:.2}s\n", duration));
+        }
+
         if result.switched_to_async {
             result_text.push_str("\nStatus: SWITCHED TO BACKGROUND\n");
             result_text
@@ -274,15 +278,7 @@ RETURNS:
         result_text.push_str(&format!("Working Directory: {}\n", job.cwd));
         result_text.push_str(&format!("Status: {:?}\n", job.status));
 
-        if let Some(exit_code) = job.exit_code {
-            result_text.push_str(&format!("Exit Code: {}\n", exit_code));
-        }
-
-        if let Some(pid) = job.pid {
-            result_text.push_str(&format!("PID: {}\n", pid));
-        }
-
-        // Calculate duration
+        // Calculate and display duration
         let duration = if let Some(finished) = job.finished_at {
             finished
                 .duration_since(job.started_at)
@@ -291,10 +287,18 @@ RETURNS:
         } else {
             std::time::SystemTime::now()
                 .duration_since(job.started_at)
-                .map(|d| format!("{:.2}s (still running)", d.as_secs_f64()))
+                .map(|d| format!("{:.2}s (running)", d.as_secs_f64()))
                 .unwrap_or_else(|_| "unknown".to_string())
         };
         result_text.push_str(&format!("Duration: {}\n", duration));
+
+        if let Some(exit_code) = job.exit_code {
+            result_text.push_str(&format!("Exit Code: {}\n", exit_code));
+        }
+
+        if let Some(pid) = job.pid {
+            result_text.push_str(&format!("PID: {}\n", pid));
+        }
 
         if input.incremental {
             result_text.push_str(&format!(
