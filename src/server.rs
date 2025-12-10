@@ -169,12 +169,14 @@ RETURNS:
             result.working_directory
         ));
 
-        if let Some(duration) = result.duration_secs {
-            result_text.push_str(&format!("Duration: {:.2}s\n", duration));
-        }
-
         if result.switched_to_async {
-            result_text.push_str("\nStatus: SWITCHED TO BACKGROUND\n");
+            if let Some(duration) = result.duration_secs {
+                result_text.push_str(&format!(
+                    "Duration: {:.2}s (switched to background)\n",
+                    duration
+                ));
+            }
+            result_text.push_str("Status: SWITCHED TO BACKGROUND\n");
             result_text
                 .push_str("The command is still running. Use job_status to check progress.\n");
             result_text.push_str("\nPartial Output:\n");
@@ -184,13 +186,20 @@ RETURNS:
                     .push_str("\n\n[Output preview truncated - use job_status to get full output]");
             }
         } else {
+            // Show duration first for completed/timed out commands
+            if let Some(duration) = result.duration_secs {
+                result_text.push_str(&format!("Duration: {:.2}s\n", duration));
+            }
+
             result_text.push_str(&format!("Exit Code: {:?}\n", result.exit_code));
             result_text.push_str(&format!("Success: {}\n", result.success));
 
             if result.timed_out {
-                result_text.push_str("Status: TIMED OUT\n");
+                result_text.push_str("Status: TIMED OUT ⏱️\n");
+            } else if result.success {
+                result_text.push_str("Status: COMPLETED ✅\n");
             } else {
-                result_text.push_str("Status: COMPLETED\n");
+                result_text.push_str("Status: FAILED ❌\n");
             }
 
             result_text.push_str("\nOutput:\n");
