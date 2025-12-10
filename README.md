@@ -17,9 +17,7 @@ A standalone Model Context Protocol (MCP) server that provides terminal executio
    - Supports filtering by category (rust_tools, python_tools, etc.)
    - Categories include: package managers, build systems, programming language tools, editors, containers, and more
 
-3. **detect_shells** - Detect available shells on the system
-   - Finds installed shells (bash, zsh, fish, sh, etc.)
-   - Reports current shell from $SHELL environment variable
+**Note:** Shell information is automatically detected at server startup and included in the server instructions, so no separate tool call is needed to discover available shells.
 
 ## Installation
 
@@ -88,11 +86,7 @@ Add to your MCP client configuration (e.g., Claude Desktop, Zed):
 }
 ```
 
-#### detect_shells
 
-```json
-{}
-```
 
 ## Binary Categories
 
@@ -137,13 +131,21 @@ cargo run
 
 ## Architecture
 
-This server is built using:
+This server uses a modular structure with Rust 2024 edition:
+
+- `src/main.rs` - Entry point and server initialization
+- `src/server.rs` - MCP server implementation with tool handlers
+- `src/detection/` - Binary and shell detection logic
+- `src/tools/` - Terminal execution implementation
+
+### Dependencies
 
 - **rmcp** - Official Rust SDK for Model Context Protocol
 - **tokio** - Async runtime
 - **portable-pty** - Cross-platform PTY support for terminal emulation
 - **serde/serde_json** - Serialization
 - **schemars** - JSON Schema generation for tool inputs
+- **anyhow** - Error handling
 
 ## License
 
