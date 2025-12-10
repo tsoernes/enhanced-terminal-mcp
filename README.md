@@ -147,7 +147,7 @@ This server is built using:
 
 ## License
 
-[Your License Here]
+MIT License - see [LICENSE](LICENSE) file for details
 
 ## Credits
 
