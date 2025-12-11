@@ -120,6 +120,7 @@ impl EnhancedTerminalServer {
     }
 
     #[tool(
+        name = "enhanced_terminal",
         description = "Execute shell commands in a PTY with smart async switching and security.
 
 PARAMETERS:
@@ -236,7 +237,9 @@ RETURNS:
         Ok(CallToolResult::success(vec![Content::text(result_text)]))
     }
 
-    #[tool(description = "Get status and output of a background job.
+    #[tool(
+        name = "job_status",
+        description = "Get status and output of a background job.
 
 PARAMETERS:
 - job_id (string, required): The job identifier returned by enhanced_terminal
@@ -285,7 +288,8 @@ RETURNS:
 - output: Command output (full, incremental, or paginated based on parameters)
 - truncated: Boolean indicating if output preview was truncated
 - (pagination only) has_more: Boolean indicating if more data available
-- (pagination only) total_length: Total output size in bytes")]
+- (pagination only) total_length: Total output size in bytes"
+    )]
     async fn job_status(
         &self,
         Parameters(input): Parameters<JobStatusInput>,
@@ -409,6 +413,7 @@ RETURNS:
     }
 
     #[tool(
+        name = "job_list",
         description = "List all background jobs with status and output previews.
 
 PARAMETERS:
@@ -525,6 +530,7 @@ RETURNS: List of jobs with:
     }
 
     #[tool(
+        name = "job_cancel",
         description = "Cancel a running background job by sending SIGTERM (Unix only).
 
 PARAMETERS:
@@ -561,6 +567,7 @@ RETURNS:
     }
 
     #[tool(
+        name = "detect_binaries",
         description = "Detect developer tools and their versions with fast parallel scanning.
 
 PARAMETERS:
