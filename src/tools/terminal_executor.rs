@@ -4,6 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -175,106 +176,104 @@ pub fn execute_command(
     let start_time = Instant::now();
 
     let mut output = Vec::new();
-    let mut buffer = [0u8; 4096];
     let mut truncated = false;
     let mut timed_out = false;
     let mut switched_to_async = false;
 
-    // Use a shared atomic flag to signal async switch from a monitoring thread
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    // Channel for receiving output from reader thread
+    enum ReadMsg {
+        Data(Vec<u8>),
+        Eof,
+        Error,
+    }
 
-    let should_switch_to_async = Arc::new(AtomicBool::new(false));
-    let should_timeout = Arc::new(AtomicBool::new(false));
+    let (tx, rx): (std::sync::mpsc::Sender<ReadMsg>, Receiver<ReadMsg>) = channel();
 
-    // Spawn a monitoring thread to check elapsed time independently of I/O
-    let monitor_switch = should_switch_to_async.clone();
-    let monitor_timeout = should_timeout.clone();
-    let monitor_start = start_time;
-    let monitor_async_threshold = async_threshold;
-    let monitor_timeout_duration = timeout;
-    let force_sync = input.force_sync;
-    let monitor_job_id = job_id.clone();
-
+    // Spawn reader thread
+    let reader_job_id = job_id.clone();
     thread::spawn(move || {
+        let mut buffer = [0u8; 4096];
         loop {
-            let elapsed = monitor_start.elapsed();
-
-            // Check async threshold
-            if !force_sync && elapsed > monitor_async_threshold {
-                tracing::debug!(
-                    "Monitor thread: triggering async switch at {:.2}s for job_id={}",
-                    elapsed.as_secs_f64(),
-                    monitor_job_id
-                );
-                monitor_switch.store(true, Ordering::SeqCst);
-                break;
-            }
-
-            // Check timeout
-            if let Some(timeout_dur) = monitor_timeout_duration {
-                if elapsed > timeout_dur {
-                    tracing::debug!(
-                        "Monitor thread: triggering timeout at {:.2}s for job_id={}",
-                        elapsed.as_secs_f64(),
-                        monitor_job_id
-                    );
-                    monitor_timeout.store(true, Ordering::SeqCst);
+            match reader.read(&mut buffer) {
+                Ok(0) => {
+                    tracing::debug!("Reader thread: EOF, job_id={}", reader_job_id);
+                    let _ = tx.send(ReadMsg::Eof);
+                    break;
+                }
+                Ok(n) => {
+                    let data = buffer[..n].to_vec();
+                    if tx.send(ReadMsg::Data(data)).is_err() {
+                        break; // Main thread dropped receiver
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!("Reader thread error: {:?}, job_id={}", e, reader_job_id);
+                    let _ = tx.send(ReadMsg::Error);
                     break;
                 }
             }
-
-            thread::sleep(Duration::from_millis(100));
         }
     });
 
-    // Initial synchronous phase - read until EOF, timeout, or async threshold
+    // Main loop: check elapsed time and receive output
     loop {
-        // Check if monitoring thread signaled async switch
-        if should_switch_to_async.load(Ordering::SeqCst) {
+        let elapsed = start_time.elapsed();
+
+        // Check if we should switch to async
+        if !input.force_sync && elapsed > async_threshold {
             tracing::debug!(
-                "Main thread: async switch detected, elapsed={:.2}s, job_id={}",
-                start_time.elapsed().as_secs_f64(),
+                "Main thread: async threshold reached at {:.2}s, job_id={}",
+                elapsed.as_secs_f64(),
                 job_id
             );
             switched_to_async = true;
             break;
         }
 
-        // Check if monitoring thread signaled timeout
-        if should_timeout.load(Ordering::SeqCst) {
-            tracing::debug!("Main thread: timeout detected, job_id={}", job_id);
-            let _ = child.kill();
-            timed_out = true;
-            break;
+        // Check for overall timeout (if set)
+        if let Some(timeout_duration) = timeout {
+            if elapsed > timeout_duration {
+                tracing::debug!("Main thread: timeout reached, job_id={}", job_id);
+                let _ = child.kill();
+                timed_out = true;
+                break;
+            }
         }
 
-        // Try to read output - this may block, but monitoring thread will trigger switch
-        match reader.read(&mut buffer) {
-            Ok(0) => {
-                tracing::debug!("EOF reached, command completed: job_id={}", job_id);
-                break; // EOF
-            }
-            Ok(n) => {
-                if output.len() + n <= output_limit {
-                    output.extend_from_slice(&buffer[..n]);
+        // Try to receive output from reader thread (non-blocking)
+        match rx.try_recv() {
+            Ok(ReadMsg::Data(data)) => {
+                if output.len() + data.len() <= output_limit {
+                    output.extend_from_slice(&data);
                 } else {
                     let remaining = output_limit.saturating_sub(output.len());
-                    output.extend_from_slice(&buffer[..remaining]);
+                    output.extend_from_slice(&data[..remaining]);
                     truncated = true;
                 }
 
                 // Update job with incremental output
-                let output_str = String::from_utf8_lossy(&buffer[..n]).to_string();
+                let output_str = String::from_utf8_lossy(&data).to_string();
                 job_manager.append_output(&job_id, &output_str, output_limit);
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // No data available, sleep briefly
+            Ok(ReadMsg::Eof) => {
+                tracing::debug!("Main thread: EOF received, job_id={}", job_id);
+                break;
+            }
+            Ok(ReadMsg::Error) => {
+                tracing::warn!("Main thread: read error received, job_id={}", job_id);
+                break;
+            }
+            Err(TryRecvError::Empty) => {
+                // No data available, sleep briefly and check elapsed time again
                 thread::sleep(Duration::from_millis(10));
                 continue;
             }
-            Err(e) => {
-                tracing::warn!("Read error: {:?}, job_id={}", e, job_id);
+            Err(TryRecvError::Disconnected) => {
+                tracing::warn!("Main thread: reader thread disconnected, job_id={}", job_id);
                 break;
             }
         }
@@ -296,8 +295,8 @@ pub fn execute_command(
         thread::spawn(move || {
             tracing::debug!("Background thread started for job_id={}", job_id_clone);
             let start_bg = Instant::now();
-            let mut bg_buffer = [0u8; 4096];
 
+            // Continue receiving from the reader thread channel
             loop {
                 // Check for timeout (if set)
                 if let Some(timeout_dur) = timeout_remaining {
@@ -308,8 +307,12 @@ pub fn execute_command(
                     }
                 }
 
-                match reader.read(&mut bg_buffer) {
-                    Ok(0) => {
+                match rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(ReadMsg::Data(data)) => {
+                        let output_str = String::from_utf8_lossy(&data).to_string();
+                        job_manager_clone.append_output(&job_id_clone, &output_str, output_limit);
+                    }
+                    Ok(ReadMsg::Eof) => {
                         // Process finished
                         let exit_status = child.wait().ok();
                         let exit_code = exit_status.map(|s| s.exit_code() as i32);
@@ -327,15 +330,16 @@ pub fn execute_command(
                         job_manager_clone.complete_job(&job_id_clone, exit_code, status);
                         break;
                     }
-                    Ok(n) => {
-                        let output_str = String::from_utf8_lossy(&bg_buffer[..n]).to_string();
-                        job_manager_clone.append_output(&job_id_clone, &output_str, output_limit);
+                    Ok(ReadMsg::Error) => {
+                        job_manager_clone.complete_job(&job_id_clone, None, JobStatus::Failed);
+                        break;
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(10));
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        // No data, continue loop to check timeout
                         continue;
                     }
-                    Err(_) => {
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        // Reader thread died unexpectedly
                         job_manager_clone.complete_job(&job_id_clone, None, JobStatus::Failed);
                         break;
                     }
