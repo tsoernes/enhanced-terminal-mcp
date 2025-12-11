@@ -17,14 +17,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `detect_binaries` remains unchanged (no prefix needed)
 
 ### Added
-- **Streaming Mode**: Real-time output streaming for long-running commands
-  - New `stream` parameter in `enhanced_terminal` tool
-  - When `stream=true`, command immediately runs in background
-  - Bypasses `async_threshold_secs` for instant background execution
-  - Poll with `enhanced_terminal_job_status` (incremental=true) for live updates
-  - Each poll returns only new output since last check
-  - Perfect for: compilation, tests, deployments, log monitoring
-  - Example: `{"command": "npm run build", "stream": true}`
 - **Job Tags and Metadata**: Enhanced job tracking with rich metadata
   - Add custom tags to jobs via `tags` parameter in `enhanced_terminal`
   - Automatic command summary generation (first 100 chars)

@@ -134,7 +134,6 @@ PARAMETERS:
 - force_sync (boolean, default: false): Force synchronous execution regardless of duration
 - custom_denylist (array, default: []): Additional dangerous patterns to block
 - tags (array, default: []): Optional tags for categorizing jobs (e.g., [\"build\", \"ci\"])
-- stream (boolean, default: false): Enable streaming mode - immediately switches to background for real-time output polling
 
 AVAILABLE SHELLS:
 {shell_list}
@@ -201,17 +200,9 @@ RETURNS:
                     duration
                 ));
             }
-            if result.streaming {
-                result_text.push_str("Status: STREAMING MODE\n");
-                result_text
-                    .push_str("The command is running in background with streaming enabled.\n");
-                result_text.push_str("Use enhanced_terminal_job_status with incremental=true to poll for real-time updates.\n");
-                result_text
-                    .push_str("Each call will return only new output since the last check.\n");
-            } else {
-                result_text.push_str("Status: SWITCHED TO BACKGROUND\n");
-                result_text.push_str("The command is still running. Use enhanced_terminal_job_status to check progress.\n");
-            }
+            result_text.push_str("Status: SWITCHED TO BACKGROUND\n");
+            result_text
+                .push_str("The command is still running. Use enhanced_terminal_job_status to check progress.\n");
             result_text.push_str("\nPartial Output:\n");
             result_text.push_str(&result.output);
             if result.truncated {
@@ -692,15 +683,6 @@ impl rmcp::ServerHandler for EnhancedTerminalServer {
             Commands exceeding async_threshold_secs (default: 50s) automatically move to background.\n\
             Returns immediately with job_id. Use enhanced_terminal_job_status with incremental=true to poll for updates.\n\
             Set force_sync=true to wait for completion regardless of duration.\n\
-            \n\
-            STREAMING MODE:\n\
-            Set stream=true to immediately run in background for real-time output:\n\
-            • Command starts in background instantly (async_threshold bypassed)\n\
-            • Returns job_id immediately\n\
-            • Poll with enhanced_terminal_job_status (incremental=true) for live updates\n\
-            • Each poll returns only new output since last check\n\
-            • Perfect for long-running commands where you want live feedback\n\
-            • Example: stream compilation, test execution, or deployment logs\n\
             \n\
             ENVIRONMENT VARIABLES:\n\
             Set environment variables via env_vars parameter:\n\
