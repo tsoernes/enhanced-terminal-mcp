@@ -13,17 +13,17 @@ A standalone Model Context Protocol (MCP) server that provides terminal executio
    - Security denylist blocks dangerous commands
    - Returns job ID for tracking background tasks
 
-2. **job_status** - Get status and output of background jobs
+2. **enhanced_terminal_job_status** - Get status and output of background jobs
    - Check progress of long-running commands
    - Retrieve full output when complete
    - View exit codes and duration
 
-3. **job_list** - List all jobs (running and completed)
+3. **enhanced_terminal_job_list** - List all jobs (running and completed)
    - See recent command history
    - Filter and limit results
    - Quick overview of job statuses
 
-4. **job_cancel** - Cancel running background jobs (Unix only)
+4. **enhanced_terminal_job_cancel** - Cancel running background jobs (Unix only)
    - Send SIGTERM to running processes
    - Graceful termination of long-running commands
 
@@ -147,7 +147,7 @@ With tags for job categorization:
 }
 ```
 
-#### job_status
+#### enhanced_terminal_job_status
 
 Get full output:
 ```json
@@ -183,7 +183,7 @@ Get paginated output (next 1000 bytes):
 }
 ```
 
-#### job_list
+#### enhanced_terminal_job_list
 
 List all jobs:
 ```json
@@ -226,7 +226,7 @@ Combined filters with sort order:
 }
 ```
 
-#### job_cancel
+#### enhanced_terminal_job_cancel
 
 ```json
 {
@@ -346,7 +346,7 @@ Set `force_sync: true` to disable this behavior for specific commands.
 
 ### Incremental Output
 
-Use `job_status` with `incremental: true` for efficient polling of long-running jobs:
+Use `enhanced_terminal_job_status` with `incremental: true` for efficient polling of long-running jobs:
 - First call returns all output accumulated so far
 - Subsequent calls return only new output since last check
 - Read position tracked per job_id
@@ -356,7 +356,7 @@ This enables streaming-like behavior without actual streaming infrastructure.
 
 ### Output Pagination
 
-For very long outputs, use pagination mode in `job_status`:
+For very long outputs, use pagination mode in `enhanced_terminal_job_status`:
 - Set `offset` to starting byte position
 - Set `limit` to number of bytes to return (0 = all remaining)
 - Returns `has_more` flag and `total_length`
@@ -382,7 +382,7 @@ Tag jobs when creating them for easier organization:
 }
 ```
 
-Filter jobs by various criteria in `job_list`:
+Filter jobs by various criteria in `enhanced_terminal_job_list`:
 - **status_filter**: Match specific statuses (e.g., ["Running", "Completed"])
 - **tag_filter**: Show only jobs with a specific tag
 - **cwd_filter**: Show only jobs from a specific directory

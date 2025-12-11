@@ -140,7 +140,7 @@ AVAILABLE SHELLS:
 
 BEHAVIOR:
 - Commands running longer than async_threshold_secs automatically switch to background
-- Returns job_id for tracking via job_status
+- Returns job_id for tracking via enhanced_terminal_job_status
 - Security denylist blocks dangerous commands (rm -rf /, shutdown, fork bombs, etc.)
 - PTY support preserves colors and terminal features
 - Incremental output captured during background execution
@@ -202,12 +202,12 @@ RETURNS:
             }
             result_text.push_str("Status: SWITCHED TO BACKGROUND\n");
             result_text
-                .push_str("The command is still running. Use job_status to check progress.\n");
+                .push_str("The command is still running. Use enhanced_terminal_job_status to check progress.\n");
             result_text.push_str("\nPartial Output:\n");
             result_text.push_str(&result.output);
             if result.truncated {
                 result_text
-                    .push_str("\n\n[Output preview truncated - use job_status to get full output]");
+                    .push_str("\n\n[Output preview truncated - use enhanced_terminal_job_status to get full output]");
             }
         } else {
             // Show duration first for completed/timed out commands
@@ -238,7 +238,7 @@ RETURNS:
     }
 
     #[tool(
-        name = "job_status",
+        name = "enhanced_terminal_job_status",
         description = "Get status and output of a background job.
 
 PARAMETERS:
@@ -413,7 +413,7 @@ RETURNS:
     }
 
     #[tool(
-        name = "job_list",
+        name = "enhanced_terminal_job_list",
         description = "List all background jobs with status and output previews.
 
 PARAMETERS:
@@ -530,7 +530,7 @@ RETURNS: List of jobs with:
     }
 
     #[tool(
-        name = "job_cancel",
+        name = "enhanced_terminal_job_cancel",
         description = "Cancel a running background job by sending SIGTERM (Unix only).
 
 PARAMETERS:
@@ -559,7 +559,7 @@ RETURNS:
             .map_err(|e| McpError::internal_error(format!("Failed to cancel job: {}", e), None))?;
 
         let result_text = format!(
-            "Job {} has been canceled. Use job_status to verify.",
+            "Job {} has been canceled. Use enhanced_terminal_job_status to verify.",
             input.job_id
         );
 
@@ -655,14 +655,14 @@ impl rmcp::ServerHandler for EnhancedTerminalServer {
                • Output: 16KB limit (configurable), captured incrementally\n\
                • Returns: job_id for tracking background execution\n\
             \n\
-            2. job_status - Monitor background jobs\n\
+            2. enhanced_terminal_job_status - Monitor background jobs\n\
                • Get current status: Running, Completed, Failed, TimedOut, Canceled\n\
                • Output modes: Incremental (default, new since last check) or Full (all output)\n\
                • Incremental mode is default and recommended for efficiency\n\
                • Set incremental=false to get all output from start\n\
                • Returns: status, exit_code, duration, output, PID\n\
             \n\
-            3. job_list - List all jobs\n\
+            3. enhanced_terminal_job_list - List all jobs\n\
                • Shows recent jobs (newest first)\n\
                • Configurable limit (default: 50)\n\
                • Quick overview with output previews\n\
@@ -681,7 +681,7 @@ impl rmcp::ServerHandler for EnhancedTerminalServer {
             \n\
             SMART ASYNC:\n\
             Commands exceeding async_threshold_secs (default: 50s) automatically move to background.\n\
-            Returns immediately with job_id. Use job_status with incremental=true to poll for updates.\n\
+            Returns immediately with job_id. Use enhanced_terminal_job_status with incremental=true to poll for updates.\n\
             Set force_sync=true to wait for completion regardless of duration.\n\
             \n\
             ENVIRONMENT VARIABLES:\n\
@@ -698,7 +698,7 @@ impl rmcp::ServerHandler for EnhancedTerminalServer {
             • Custom patterns: Add via custom_denylist parameter\n\
             \n\
             INCREMENTAL OUTPUT (DEFAULT):\n\
-            job_status uses incremental mode by default (recommended):\n\
+            enhanced_terminal_job_status uses incremental mode by default (recommended):\n\
             • First call: Returns all output accumulated so far\n\
             • Subsequent calls: Only new output since last check\n\
             • Efficient polling for long-running jobs\n\

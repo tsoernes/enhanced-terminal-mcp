@@ -7,13 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **BREAKING: Tool Renaming**: Job management tools renamed for better namespacing
+  - `job_status` → `enhanced_terminal_job_status`
+  - `job_list` → `enhanced_terminal_job_list`
+  - `job_cancel` → `enhanced_terminal_job_cancel`
+  - Provides clear namespacing and prevents conflicts with other MCP servers
+  - Main tool remains `enhanced_terminal` (unchanged)
+  - `detect_binaries` remains unchanged (no prefix needed)
+
 ### Added
 - **Job Tags and Metadata**: Enhanced job tracking with rich metadata
   - Add custom tags to jobs via `tags` parameter in `enhanced_terminal`
   - Automatic command summary generation (first 100 chars)
-  - Tags displayed in `job_status` and `job_list` outputs
+  - Tags displayed in `enhanced_terminal_job_status` and `enhanced_terminal_job_list` outputs
   - Example: `{"command": "cargo build", "tags": ["build", "release"]}`
-- **Job Filtering**: Advanced filtering in `job_list` tool
+- **Job Filtering**: Advanced filtering in `enhanced_terminal_job_list` tool
   - Filter by status: `status_filter` (e.g., ["Running", "Completed"])
   - Filter by tag: `tag_filter` (e.g., "build")
   - Filter by working directory: `cwd_filter`
@@ -26,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Returns `total_length` for overall output size
   - Useful for very long logs without retrieving full output
   - Three modes: incremental (default), full, and paginated
-- **Incremental Output**: `job_status` now supports `incremental` parameter
+- **Incremental Output**: `enhanced_terminal_job_status` now supports `incremental` parameter
   - Returns only new output since last check when `incremental: true`
   - First call returns all accumulated output
   - Subsequent calls return only new output
@@ -38,6 +47,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Enhanced Tool Documentation**: Comprehensive parameter descriptions exposed via MCP
   - Detailed descriptions for all parameters
   - Usage examples in tool descriptions
+- **Explicit Tool Names**: All tools now have explicit names to prevent auto-generation issues
+  - Prevents tools from being incorrectly named with double prefixes
+  - Ensures consistent tool invocation across MCP clients
   - Behavior explanations for each tool
   - Clear return value documentation
 - **Zed Integration**: Automatically added to Zed editor configuration
