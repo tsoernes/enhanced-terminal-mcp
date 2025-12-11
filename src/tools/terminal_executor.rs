@@ -76,10 +76,17 @@ pub struct ExecutionResult {
 }
 
 pub fn execute_command(
-    input: TerminalExecutionInput,
+    input: &TerminalExecutionInput,
     job_manager: &JobManager,
 ) -> Result<ExecutionResult> {
     let command = input.command.trim();
+
+    tracing::debug!(
+        "execute_command called: command={}, async_threshold_secs={}, force_sync={}",
+        command,
+        input.async_threshold_secs,
+        input.force_sync
+    );
 
     if command.is_empty() {
         return Err(anyhow::anyhow!("Command cannot be empty"));
@@ -173,27 +180,81 @@ pub fn execute_command(
     let mut timed_out = false;
     let mut switched_to_async = false;
 
-    // Initial synchronous phase
-    loop {
-        let elapsed = start_time.elapsed();
+    // Use a shared atomic flag to signal async switch from a monitoring thread
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-        // Check if we should switch to async
-        if !input.force_sync && elapsed > async_threshold {
+    let should_switch_to_async = Arc::new(AtomicBool::new(false));
+    let should_timeout = Arc::new(AtomicBool::new(false));
+
+    // Spawn a monitoring thread to check elapsed time independently of I/O
+    let monitor_switch = should_switch_to_async.clone();
+    let monitor_timeout = should_timeout.clone();
+    let monitor_start = start_time;
+    let monitor_async_threshold = async_threshold;
+    let monitor_timeout_duration = timeout;
+    let force_sync = input.force_sync;
+    let monitor_job_id = job_id.clone();
+
+    thread::spawn(move || {
+        loop {
+            let elapsed = monitor_start.elapsed();
+
+            // Check async threshold
+            if !force_sync && elapsed > monitor_async_threshold {
+                tracing::debug!(
+                    "Monitor thread: triggering async switch at {:.2}s for job_id={}",
+                    elapsed.as_secs_f64(),
+                    monitor_job_id
+                );
+                monitor_switch.store(true, Ordering::SeqCst);
+                break;
+            }
+
+            // Check timeout
+            if let Some(timeout_dur) = monitor_timeout_duration {
+                if elapsed > timeout_dur {
+                    tracing::debug!(
+                        "Monitor thread: triggering timeout at {:.2}s for job_id={}",
+                        elapsed.as_secs_f64(),
+                        monitor_job_id
+                    );
+                    monitor_timeout.store(true, Ordering::SeqCst);
+                    break;
+                }
+            }
+
+            thread::sleep(Duration::from_millis(100));
+        }
+    });
+
+    // Initial synchronous phase - read until EOF, timeout, or async threshold
+    loop {
+        // Check if monitoring thread signaled async switch
+        if should_switch_to_async.load(Ordering::SeqCst) {
+            tracing::debug!(
+                "Main thread: async switch detected, elapsed={:.2}s, job_id={}",
+                start_time.elapsed().as_secs_f64(),
+                job_id
+            );
             switched_to_async = true;
             break;
         }
 
-        // Check for overall timeout (if set)
-        if let Some(timeout_duration) = timeout {
-            if elapsed > timeout_duration {
-                let _ = child.kill();
-                timed_out = true;
-                break;
-            }
+        // Check if monitoring thread signaled timeout
+        if should_timeout.load(Ordering::SeqCst) {
+            tracing::debug!("Main thread: timeout detected, job_id={}", job_id);
+            let _ = child.kill();
+            timed_out = true;
+            break;
         }
 
+        // Try to read output - this may block, but monitoring thread will trigger switch
         match reader.read(&mut buffer) {
-            Ok(0) => break, // EOF
+            Ok(0) => {
+                tracing::debug!("EOF reached, command completed: job_id={}", job_id);
+                break; // EOF
+            }
             Ok(n) => {
                 if output.len() + n <= output_limit {
                     output.extend_from_slice(&buffer[..n]);
@@ -208,20 +269,32 @@ pub fn execute_command(
                 job_manager.append_output(&job_id, &output_str, output_limit);
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // No data available, sleep briefly
                 thread::sleep(Duration::from_millis(10));
                 continue;
             }
-            Err(_) => break,
+            Err(e) => {
+                tracing::warn!("Read error: {:?}, job_id={}", e, job_id);
+                break;
+            }
         }
     }
 
     if switched_to_async {
+        tracing::info!(
+            "Command switched to async mode: job_id={}, elapsed={:.2}s, output_so_far={} bytes",
+            job_id,
+            start_time.elapsed().as_secs_f64(),
+            output.len()
+        );
+
         // Spawn background thread to continue monitoring
         let job_manager_clone = job_manager.clone();
         let job_id_clone = job_id.clone();
         let timeout_remaining = timeout.map(|t| t.saturating_sub(start_time.elapsed()));
 
         thread::spawn(move || {
+            tracing::debug!("Background thread started for job_id={}", job_id_clone);
             let start_bg = Instant::now();
             let mut bg_buffer = [0u8; 4096];
 
@@ -245,6 +318,12 @@ pub fn execute_command(
                         } else {
                             JobStatus::Failed
                         };
+                        tracing::debug!(
+                            "Background job completed: job_id={}, exit_code={:?}, status={:?}",
+                            job_id_clone,
+                            exit_code,
+                            status
+                        );
                         job_manager_clone.complete_job(&job_id_clone, exit_code, status);
                         break;
                     }
@@ -264,9 +343,14 @@ pub fn execute_command(
             }
         });
 
-        // Return with current output and duration so far
+        // Return immediately with current output and duration so far
         let output_str = String::from_utf8_lossy(&output).to_string();
         let duration_secs = start_time.elapsed().as_secs_f64();
+        tracing::info!(
+            "Returning async result: job_id={}, duration={:.2}s",
+            job_id,
+            duration_secs
+        );
         return Ok(ExecutionResult {
             job_id,
             command: command.to_string(),
@@ -301,6 +385,13 @@ pub fn execute_command(
     job_manager.complete_job(&job_id, exit_code, status);
 
     let duration_secs = start_time.elapsed().as_secs_f64();
+
+    tracing::debug!(
+        "Synchronous command completed: job_id={}, exit_code={:?}, duration={:.2}s",
+        job_id,
+        exit_code,
+        duration_secs
+    );
 
     Ok(ExecutionResult {
         job_id,

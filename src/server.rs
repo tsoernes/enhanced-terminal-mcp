@@ -171,7 +171,7 @@ RETURNS:
     ) -> Result<CallToolResult, McpError> {
         // Replace {shell_list} placeholder in description with actual shells
         // (Note: This is done at runtime in the description, but we'll handle it in server instructions)
-        let result = execute_command(input, &self.job_manager).map_err(|e| {
+        let result = execute_command(&input, &self.job_manager).map_err(|e| {
             McpError::internal_error(format!("Command execution failed: {}", e), None)
         })?;
 
