@@ -41,6 +41,9 @@ pub struct TerminalExecutionInput {
     /// Optional tags for categorizing jobs (e.g., ["build", "ci"])
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Enable streaming output (periodic updates while running)
+    #[serde(default)]
+    pub stream: bool,
 }
 
 fn default_cwd() -> String {
@@ -73,6 +76,7 @@ pub struct ExecutionResult {
     pub denied: bool,
     pub denial_reason: Option<String>,
     pub duration_secs: Option<f64>,
+    pub streaming: bool,
 }
 
 pub fn execute_command(
@@ -99,11 +103,9 @@ pub fn execute_command(
             timed_out: false,
             switched_to_async: false,
             denied: true,
-            denial_reason: Some(format!(
-                "Command denied by security policy. Matched pattern: {}",
-                matched_pattern.unwrap_or_else(|| "unknown".to_string())
-            )),
+            denial_reason: matched_pattern,
             duration_secs: None,
+            streaming: false,
         });
     }
 
@@ -164,7 +166,12 @@ pub fn execute_command(
 
     let output_limit = input.output_limit;
     let timeout = input.timeout_secs.map(Duration::from_secs);
-    let async_threshold = Duration::from_secs(input.async_threshold_secs);
+    let async_threshold = if input.stream {
+        // Streaming mode: switch to async immediately
+        Duration::from_millis(1)
+    } else {
+        Duration::from_secs(input.async_threshold_secs)
+    };
     let start_time = Instant::now();
 
     let mut output = Vec::new();
@@ -280,6 +287,7 @@ pub fn execute_command(
             denied: false,
             denial_reason: None,
             duration_secs: Some(duration_secs),
+            streaming: input.stream,
         });
     }
 
@@ -315,5 +323,6 @@ pub fn execute_command(
         denied: false,
         denial_reason: None,
         duration_secs: Some(duration_secs),
+        streaming: false,
     })
 }

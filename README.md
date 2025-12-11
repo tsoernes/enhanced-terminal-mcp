@@ -147,6 +147,16 @@ With tags for job categorization:
 }
 ```
 
+With streaming mode for real-time output:
+```json
+{
+  "command": "npm run build",
+  "stream": true,
+  "tags": ["build"]
+}
+```
+Returns immediately with job_id. Poll with `enhanced_terminal_job_status` (incremental=true) for live updates.
+
 #### enhanced_terminal_job_status
 
 Get full output:
@@ -354,6 +364,46 @@ Use `enhanced_terminal_job_status` with `incremental: true` for efficient pollin
 
 This enables streaming-like behavior without actual streaming infrastructure.
 
+### Streaming Mode
+
+Enable real-time output streaming for long-running commands:
+
+```json
+{
+  "command": "cargo build --release",
+  "stream": true
+}
+```
+
+How it works:
+- Command immediately runs in background (bypasses async_threshold)
+- Returns job_id instantly
+- Poll with `enhanced_terminal_job_status` (incremental=true) for live updates
+- Each poll returns only new output since last check
+- Perfect for: compilation, tests, deployments, log monitoring
+
+Example streaming workflow:
+```javascript
+// 1. Start streaming command
+const result = await enhanced_terminal({
+  command: "npm run test",
+  stream: true
+});
+
+// 2. Poll for updates in a loop
+while (true) {
+  const status = await enhanced_terminal_job_status({
+    job_id: result.job_id,
+    incremental: true
+  });
+  
+  console.log(status.output); // Only new output
+  
+  if (status.status !== "Running") break;
+  await sleep(500); // Poll every 500ms
+}
+```
+
 ### Output Pagination
 
 For very long outputs, use pagination mode in `enhanced_terminal_job_status`:
@@ -389,6 +439,36 @@ Filter jobs by various criteria in `enhanced_terminal_job_list`:
 - **sort_order**: "newest" (default) or "oldest"
 
 All filters can be combined for powerful queries.
+
+## Streaming vs Async vs Synchronous Modes
+
+The server supports three execution modes:
+
+| Mode | When to Use | How to Enable | Behavior |
+|------|-------------|---------------|----------|
+| **Synchronous** | Quick commands (<50s) | Default or `force_sync=true` | Waits for completion, returns full output |
+| **Async** | Long commands (>50s) | Automatic or set low `async_threshold_secs` | Switches to background, poll for status |
+| **Streaming** | Real-time monitoring | `stream=true` | Immediate background, incremental output polling |
+
+### When to Use Streaming
+
+- ✅ Compilation with live progress
+- ✅ Test suites with real-time results
+- ✅ Deployments with status updates
+- ✅ Log monitoring and tail-like behavior
+- ✅ Any command where you want live feedback
+
+### When to Use Async (Non-Streaming)
+
+- ✅ Long-running commands where you check status occasionally
+- ✅ Batch operations you'll review later
+- ✅ Background tasks you don't need to monitor continuously
+
+### When to Use Synchronous
+
+- ✅ Quick commands (<50 seconds)
+- ✅ Scripts that must complete before proceeding
+- ✅ Simple queries or checks
 
 ## Architecture
 
