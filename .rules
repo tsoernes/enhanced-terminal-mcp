@@ -1,0 +1,121 @@
+# Repository Summary
+
+## Executive Overview
+
+This repository is organized around a detection-focused codebase, with source modules under src and accompanying documentation under docs. The structure separates core detection functionality from supporting tools, promoting maintainability and clear boundaries between algorithmic logic and operational utilities.
+
+- Architecture: src contains two primary modules—detection for core detection logic and tools for auxiliary utilities and workflows—while docs provides project documentation. This modular layout supports extensibility and testability by keeping responsibilities isolated.
+- Major subsystems: 
+  - Detection: core algorithms and pipeline components for detection tasks.
+  - Tools: utilities and scripts that aid data handling, evaluation, and operational workflows.
+  - Documentation: guidance for usage, design, and operations.
+- Key patterns: separation of concerns via directory boundaries, modular organization for pluggable or extendable detectors, and a conventional src-based layout that simplifies dependency management and collaboration.
+
+## Directory & File Hierarchy for key files
+
+## .
+
+Repository root that organizes the project into source and documentation directories. Acts as the top-level entry point for the project's structure and collaboration.
+
+**Files:**
+
+- `.gitignore` : Git ignore patterns
+- `Cargo.toml` : Rust project manifest with dependencies (rmcp, tokio, portable-pty, tracing)
+- `LICENSE` : Project license
+- `README.md` : Project documentation
+- `test_mcp.sh` : MCP server test script
+
+### docs
+
+Holds project documentation, such as usage guides, design notes, and operational instructions. Intended to guide users and developers in understanding and working with the detection components and tools.
+
+**Files:**
+
+- `docs/BUGFIX_TOOL_NAMING.md` : Bug fix documentation for tool naming issues
+- `docs/CHANGELOG.md` : Project changelog
+- `docs/DEBUGGING_TIMEOUT_ISSUE.md` : Documentation on debugging timeout issues
+- `docs/FEATURES.md` : Feature documentation
+- `docs/FEATURES_IMPLEMENTATION.md` : Implementation details for features
+- `docs/FINAL_SUMMARY.md` : Final project summary
+- `docs/IMPLEMENTATION_COMPLETE.md` : Implementation completion notes
+- `docs/IMPLEMENTATION_SUMMARY.md` : Summary of implementation
+- `docs/LIVE_TEST_RESULTS.md` : Live testing results
+- `docs/MIGRATION_GUIDE.md` : Migration guide
+- `docs/PROJECT_COMPLETE.md` : Project completion documentation
+- `docs/SUMMARY.md` : General summary
+- `docs/TIMEOUT_INVESTIGATION.md` : Guide for investigating timeout issues
+- `docs/manual_test.md` : Manual testing documentation
+- `docs/test_new_features.md` : New feature testing guide
+
+### src
+
+Top-level source directory that organizes the codebase into domain modules. Serves as the integration layer where detection and tools can be composed by higher-level application code.
+
+**Files:**
+
+- `src/main.rs` : Main entry point with tracing initialization and MCP server startup
+- `src/server.rs` : MCP server implementation with enhanced terminal tools
+
+#### src/detection
+
+Contains the core detection module, including algorithms and pipeline components tailored for detection tasks. Designed to keep domain logic focused and allow extension with new detectors or strategies.
+
+**Files:**
+
+- `src/detection/binary_detector.rs` : Binary detection and version probing utilities
+- `src/detection/mod.rs` : Detection module exports
+
+#### src/tools
+
+Provides auxiliary tooling to support detection workflows, such as data preprocessing, evaluation helpers, experiment orchestration, or CLI utilities. Keeps non-core scripts separated from the detection logic for cleaner maintenance.
+
+**Files:**
+
+- `src/tools/denylist.rs` : Command denylist for security
+- `src/tools/job_manager.rs` : Background job management with status tracking
+- `src/tools/mod.rs` : Tools module exports
+- `src/tools/terminal_executor.rs` : Terminal command execution with smart async switching and channel-based I/O
+
+## Key Implementation Details
+
+### Enhanced Terminal MCP Server
+
+This is an MCP (Model Context Protocol) server that provides enhanced terminal execution capabilities with smart async switching to prevent timeout issues.
+
+**Core Features:**
+
+1. **Smart Async Switching**: Commands automatically switch to background execution when they exceed a configurable threshold (default: 50 seconds), preventing Zed's 60-second timeout
+2. **Channel-based I/O**: Uses `mpsc::channel` to move PTY reading to a separate thread, allowing the main thread to check elapsed time every 10ms without blocking on I/O
+3. **Job Management**: Background jobs can be monitored, listed, and canceled
+4. **Security**: Command denylist to prevent dangerous operations
+5. **Tracing**: Comprehensive logging with `tracing` crate for debugging
+
+**Architecture:**
+
+- **Reader Thread**: Continuously reads from PTY, sends data via channel
+- **Main Thread**: Non-blockingly receives from channel, checks elapsed time every 10ms
+- **Background Thread**: Spawned when async threshold reached, continues receiving from same channel
+- **Job Manager**: Tracks job status, output, and metadata
+
+**Recent Bug Fixes:**
+
+- Fixed timeout issue where commands would timeout despite async threshold < 60s
+- Root cause: Main thread was blocked in `reader.read()` and couldn't check elapsed time
+- Solution: Moved reader to separate thread with channel communication
+- Result: Async switch happens within 10ms of threshold reliably
+
+**Environment Variables:**
+
+For commands like `gh` that detect PTY and show interactive prompts, use:
+- `GH_PAGER=""` 
+- `PAGER="cat"`
+- `TERM="dumb"`
+
+## Summary Statistics
+
+- Total files in repository: 28
+- Total textual files scanned: 28
+- Files included after budget/filter: 28
+- Strategy (comprehension level): comprehensive (auto-selected)
+- Model (generation): gpt-5
+- Summary token count: 845
