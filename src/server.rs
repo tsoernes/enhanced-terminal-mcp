@@ -576,13 +576,14 @@ PARAMETERS:
 - version_timeout_ms (number, default: 1500): Timeout per binary version check in milliseconds
 - include_missing (boolean, default: false): Include binaries not found in PATH
 
-CATEGORIES (100+ tools):
+CATEGORIES (120+ tools):
 - package_managers: npm, pip, cargo, dnf, apt, snap, flatpak, brew
 - rust_tools: cargo, rustc, rustfmt, clippy
 - python_tools: python, pip, pytest, black, ruff, mypy
-- build_systems: make, cmake, ninja, gradle, maven
+- build_systems: make, cmake, ninja, gradle, maven, mvn
 - c_cpp_tools: gcc, g++, clang, gdb, lldb
-- java_jvm_tools: java, javac, kotlin
+- java_jvm_tools: java, javac, javadoc, jar, jarsigner, jconsole, jdeps, jlink, jshell, kotlin, kotlinc, scala, scalac, groovy, groovyc
+- maven_tools: mvn, mvnw, mvnd
 - node_js_tools: node, deno, bun, npm, yarn
 - go_tools: go, gofmt
 - editors_dev: vim, nvim, emacs, code, zed
