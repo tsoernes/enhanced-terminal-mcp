@@ -7,7 +7,7 @@ A standalone Model Context Protocol (MCP) server that provides terminal executio
 ### Tools
 
 1. **enhanced_terminal** - Execute shell commands with smart async switching
-   - Automatically switches to background after 5 seconds (configurable)
+   - Automatically switches to background after 50 seconds (configurable)
    - PTY support with proper terminal emulation
    - Configurable working directory, shell, timeout, and output limits
    - Security denylist blocks dangerous commands
