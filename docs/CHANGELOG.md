@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Timeout Issue**: Fixed "Context server request timeout" errors when commands ran longer than 60 seconds
+  - Converted `execute_command` from synchronous to async function using Tokio primitives
+  - Replaced `std::sync::mpsc` with `tokio::sync::mpsc::unbounded_channel`
+  - Replaced `std::thread::spawn` with `tokio::spawn` and `tokio::task::spawn_blocking`
+  - Made async threshold check independent of I/O operations (checks every 100ms)
+  - Main loop no longer blocks on PTY reads - uses timeout-based receive
+  - Ensures function returns job ID before Zed's 60-second MCP timeout
+  - Async threshold (default 50s) now reliably triggers regardless of command output patterns
+  - See `docs/TIMEOUT_FIX.md` for detailed technical explanation
+
 ### Changed
 - **BREAKING: Tool Renaming**: Job management tools renamed for better namespacing
   - `job_status` → `enhanced_terminal_job_status`
