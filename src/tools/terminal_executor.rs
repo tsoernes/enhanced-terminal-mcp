@@ -4,9 +4,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, TryRecvError, channel};
-use std::thread;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 
 use super::denylist::{find_matched_pattern, is_denied};
 use super::job_manager::{JobManager, JobStatus};
@@ -76,7 +76,7 @@ pub struct ExecutionResult {
     pub duration_secs: Option<f64>,
 }
 
-pub fn execute_command(
+pub async fn execute_command(
     input: &TerminalExecutionInput,
     job_manager: &JobManager,
 ) -> Result<ExecutionResult> {
@@ -180,38 +180,39 @@ pub fn execute_command(
     let mut timed_out = false;
     let mut switched_to_async = false;
 
-    // Channel for receiving output from reader thread
+    // Channel for receiving output from reader task
+    #[derive(Debug)]
     enum ReadMsg {
         Data(Vec<u8>),
         Eof,
         Error,
     }
 
-    let (tx, rx): (std::sync::mpsc::Sender<ReadMsg>, Receiver<ReadMsg>) = channel();
+    let (tx, mut rx) = mpsc::unbounded_channel::<ReadMsg>();
 
-    // Spawn reader thread
+    // Spawn reader task using tokio::task::spawn_blocking (PTY read is blocking I/O)
     let reader_job_id = job_id.clone();
-    thread::spawn(move || {
+    tokio::task::spawn_blocking(move || {
         let mut buffer = [0u8; 4096];
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => {
-                    tracing::debug!("Reader thread: EOF, job_id={}", reader_job_id);
+                    tracing::debug!("Reader task: EOF, job_id={}", reader_job_id);
                     let _ = tx.send(ReadMsg::Eof);
                     break;
                 }
                 Ok(n) => {
                     let data = buffer[..n].to_vec();
                     if tx.send(ReadMsg::Data(data)).is_err() {
-                        break; // Main thread dropped receiver
+                        break; // Main task dropped receiver
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(10));
+                    std::thread::sleep(Duration::from_millis(10));
                     continue;
                 }
                 Err(e) => {
-                    tracing::warn!("Reader thread error: {:?}, job_id={}", e, reader_job_id);
+                    tracing::warn!("Reader task error: {:?}, job_id={}", e, reader_job_id);
                     let _ = tx.send(ReadMsg::Error);
                     break;
                 }
@@ -219,14 +220,15 @@ pub fn execute_command(
         }
     });
 
-    // Main loop: check elapsed time and receive output
+    // Main loop: check elapsed time independently and receive output
+    let check_interval = Duration::from_millis(100);
     loop {
         let elapsed = start_time.elapsed();
 
-        // Check if we should switch to async
+        // Check if we should switch to async (independent of I/O)
         if !input.force_sync && elapsed > async_threshold {
             tracing::debug!(
-                "Main thread: async threshold reached at {:.2}s, job_id={}",
+                "Main task: async threshold reached at {:.2}s, job_id={}",
                 elapsed.as_secs_f64(),
                 job_id
             );
@@ -237,16 +239,16 @@ pub fn execute_command(
         // Check for overall timeout (if set)
         if let Some(timeout_duration) = timeout {
             if elapsed > timeout_duration {
-                tracing::debug!("Main thread: timeout reached, job_id={}", job_id);
+                tracing::debug!("Main task: timeout reached, job_id={}", job_id);
                 let _ = child.kill();
                 timed_out = true;
                 break;
             }
         }
 
-        // Try to receive output from reader thread (non-blocking)
-        match rx.try_recv() {
-            Ok(ReadMsg::Data(data)) => {
+        // Try to receive output from reader task with timeout
+        match tokio::time::timeout(check_interval, rx.recv()).await {
+            Ok(Some(ReadMsg::Data(data))) => {
                 if output.len() + data.len() <= output_limit {
                     output.extend_from_slice(&data);
                 } else {
@@ -259,22 +261,21 @@ pub fn execute_command(
                 let output_str = String::from_utf8_lossy(&data).to_string();
                 job_manager.append_output(&job_id, &output_str, output_limit);
             }
-            Ok(ReadMsg::Eof) => {
-                tracing::debug!("Main thread: EOF received, job_id={}", job_id);
+            Ok(Some(ReadMsg::Eof)) => {
+                tracing::debug!("Main task: EOF received, job_id={}", job_id);
                 break;
             }
-            Ok(ReadMsg::Error) => {
-                tracing::warn!("Main thread: read error received, job_id={}", job_id);
+            Ok(Some(ReadMsg::Error)) => {
+                tracing::warn!("Main task: read error received, job_id={}", job_id);
                 break;
             }
-            Err(TryRecvError::Empty) => {
-                // No data available, sleep briefly and check elapsed time again
-                thread::sleep(Duration::from_millis(10));
+            Ok(None) => {
+                tracing::warn!("Main task: reader task disconnected, job_id={}", job_id);
+                break;
+            }
+            Err(_) => {
+                // Timeout waiting for data - this is normal, continue loop to check elapsed time
                 continue;
-            }
-            Err(TryRecvError::Disconnected) => {
-                tracing::warn!("Main thread: reader thread disconnected, job_id={}", job_id);
-                break;
             }
         }
     }
@@ -287,34 +288,38 @@ pub fn execute_command(
             output.len()
         );
 
-        // Spawn background thread to continue monitoring
+        // Spawn background task to continue monitoring
         let job_manager_clone = job_manager.clone();
         let job_id_clone = job_id.clone();
         let timeout_remaining = timeout.map(|t| t.saturating_sub(start_time.elapsed()));
+        let child_arc = Arc::new(tokio::sync::Mutex::new(child));
 
-        thread::spawn(move || {
-            tracing::debug!("Background thread started for job_id={}", job_id_clone);
+        tokio::spawn(async move {
+            tracing::debug!("Background task started for job_id={}", job_id_clone);
             let start_bg = Instant::now();
 
-            // Continue receiving from the reader thread channel
+            // Continue receiving from the reader task channel
             loop {
                 // Check for timeout (if set)
                 if let Some(timeout_dur) = timeout_remaining {
                     if start_bg.elapsed() > timeout_dur {
-                        let _ = child.kill();
+                        let mut child_guard = child_arc.lock().await;
+                        let _ = child_guard.kill();
+                        drop(child_guard);
                         job_manager_clone.complete_job(&job_id_clone, None, JobStatus::TimedOut);
                         break;
                     }
                 }
 
-                match rx.recv_timeout(Duration::from_millis(100)) {
-                    Ok(ReadMsg::Data(data)) => {
+                match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
+                    Ok(Some(ReadMsg::Data(data))) => {
                         let output_str = String::from_utf8_lossy(&data).to_string();
                         job_manager_clone.append_output(&job_id_clone, &output_str, output_limit);
                     }
-                    Ok(ReadMsg::Eof) => {
+                    Ok(Some(ReadMsg::Eof)) => {
                         // Process finished
-                        let exit_status = child.wait().ok();
+                        let mut child_guard = child_arc.lock().await;
+                        let exit_status = child_guard.wait().ok();
                         let exit_code = exit_status.map(|s| s.exit_code() as i32);
                         let status = if exit_code == Some(0) {
                             JobStatus::Completed
@@ -330,18 +335,18 @@ pub fn execute_command(
                         job_manager_clone.complete_job(&job_id_clone, exit_code, status);
                         break;
                     }
-                    Ok(ReadMsg::Error) => {
+                    Ok(Some(ReadMsg::Error)) => {
                         job_manager_clone.complete_job(&job_id_clone, None, JobStatus::Failed);
                         break;
                     }
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        // No data, continue loop to check timeout
+                    Ok(None) => {
+                        // Reader task died unexpectedly
+                        job_manager_clone.complete_job(&job_id_clone, None, JobStatus::Failed);
+                        break;
+                    }
+                    Err(_) => {
+                        // Timeout waiting for data, continue loop to check timeout
                         continue;
-                    }
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        // Reader thread died unexpectedly
-                        job_manager_clone.complete_job(&job_id_clone, None, JobStatus::Failed);
-                        break;
                     }
                 }
             }
