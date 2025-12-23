@@ -89,6 +89,18 @@ pub async fn execute_command(
         input.force_sync
     );
 
+    // Optional: server-side sudo wrapping (opt-in).
+    // When enabled, any command containing `sudo` is executed such that:
+    // - sudo authentication is primed in the server process context (askpass)
+    // - the actual privileged command runs via `sudo -n` so it never prompts
+    //
+    // This allows sudo timestamp reuse across multiple tool calls.
+    if env_bool("ENHANCED_TERMINAL_SUDO_WRAP") && sudo_looks_used(command) {
+        let report = ensure_sudo_primed_for_wrap(command, &input.env_vars).await;
+        let wrapped = wrap_sudo_command_for_server(command);
+        return execute_command_inner(&wrapped, input, job_manager, report).await;
+    }
+
     let sudo_prime_report = maybe_start_sudo_keepalive(command, &input.env_vars).await;
 
     if command.is_empty() {
@@ -457,6 +469,408 @@ pub async fn execute_command(
     })
 }
 
+async fn execute_command_inner(
+    command: &str,
+    input: &TerminalExecutionInput,
+    job_manager: &JobManager,
+    sudo_prime_report: Option<SudoPrimeReport>,
+) -> Result<ExecutionResult> {
+    let command = command.trim();
+
+    if command.is_empty() {
+        return Err(anyhow::anyhow!("Command cannot be empty"));
+    }
+
+    // Check denylist
+    if is_denied(command, &input.custom_denylist) {
+        let matched_pattern = find_matched_pattern(command, &input.custom_denylist);
+        return Ok(ExecutionResult {
+            job_id: String::new(),
+            command: command.to_string(),
+            working_directory: String::new(),
+            exit_code: None,
+            success: false,
+            output: String::new(),
+            truncated: false,
+            timed_out: false,
+            switched_to_async: false,
+            denied: true,
+            denial_reason: Some(format!(
+                "Command denied by security policy. Matched pattern: {}",
+                matched_pattern.unwrap_or_else(|| "unknown".to_string())
+            )),
+            duration_secs: None,
+        });
+    }
+
+    // Resolve working directory
+    let cwd = if input.cwd == "." || input.cwd.is_empty() {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    } else {
+        PathBuf::from(&input.cwd)
+    };
+
+    // Create PTY system
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| anyhow::anyhow!("Failed to open PTY: {}", e))?;
+
+    // Build command
+    let mut cmd = CommandBuilder::new(&input.shell);
+    cmd.arg("-c");
+    cmd.arg(command);
+    cmd.cwd(&cwd);
+
+    // Set environment variables
+    for (key, value) in &input.env_vars {
+        cmd.env(key, value);
+    }
+
+    // Start the process
+    let mut child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(|e| anyhow::anyhow!("Failed to spawn: {}", e))?;
+
+    let pid = child.process_id();
+    drop(pair.slave);
+
+    // Register job
+    let job_id = job_manager.new_job_id();
+    job_manager.register_job_with_tags(
+        job_id.clone(),
+        command.to_string(),
+        input.shell.clone(),
+        cwd.display().to_string(),
+        pid,
+        input.tags.clone(),
+    );
+
+    // Read output with smart async switching
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| anyhow::anyhow!("Failed to clone reader: {}", e))?;
+
+    let output_limit = input.output_limit;
+    let timeout = input.timeout_secs.map(Duration::from_secs);
+    let async_threshold = Duration::from_secs(input.async_threshold_secs);
+    let start_time = Instant::now();
+
+    let mut output = Vec::new();
+    let mut truncated = false;
+    let mut timed_out = false;
+    let mut switched_to_async = false;
+
+    // Channel for receiving output from reader task
+    #[derive(Debug)]
+    enum ReadMsg {
+        Data(Vec<u8>),
+        Eof,
+        Error,
+    }
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<ReadMsg>();
+
+    // Spawn reader task using tokio::task::spawn_blocking (PTY read is blocking I/O)
+    let reader_job_id = job_id.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut buffer = [0u8; 4096];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => {
+                    tracing::debug!("Reader task: EOF, job_id={}", reader_job_id);
+                    let _ = tx.send(ReadMsg::Eof);
+                    break;
+                }
+                Ok(n) => {
+                    let data = buffer[..n].to_vec();
+                    if tx.send(ReadMsg::Data(data)).is_err() {
+                        break; // Main task dropped receiver
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!("Reader task error: {:?}, job_id={}", e, reader_job_id);
+                    let _ = tx.send(ReadMsg::Error);
+                    break;
+                }
+            }
+        }
+    });
+
+    // Main loop: check elapsed time independently and receive output
+    let check_interval = Duration::from_millis(100);
+    loop {
+        let elapsed = start_time.elapsed();
+
+        // Check if we should switch to async (independent of I/O)
+        if !input.force_sync && elapsed > async_threshold {
+            tracing::debug!(
+                "Main task: async threshold reached at {:.2}s, job_id={}",
+                elapsed.as_secs_f64(),
+                job_id
+            );
+            switched_to_async = true;
+            break;
+        }
+
+        // Check for overall timeout (if set)
+        if let Some(timeout_duration) = timeout {
+            if elapsed > timeout_duration {
+                tracing::debug!("Main task: timeout reached, job_id={}", job_id);
+                let _ = child.kill();
+                timed_out = true;
+                break;
+            }
+        }
+
+        // Try to receive output from reader task with timeout
+        match tokio::time::timeout(check_interval, rx.recv()).await {
+            Ok(Some(ReadMsg::Data(data))) => {
+                if output.len() + data.len() <= output_limit {
+                    output.extend_from_slice(&data);
+                } else {
+                    let remaining = output_limit.saturating_sub(output.len());
+                    output.extend_from_slice(&data[..remaining]);
+                    truncated = true;
+                }
+
+                // Update job with incremental output
+                let output_str = String::from_utf8_lossy(&data).to_string();
+                job_manager.append_output(&job_id, &output_str, output_limit);
+            }
+            Ok(Some(ReadMsg::Eof)) => {
+                tracing::debug!("Main task: EOF received, job_id={}", job_id);
+                break;
+            }
+            Ok(Some(ReadMsg::Error)) => {
+                tracing::warn!("Main task: read error received, job_id={}", job_id);
+                break;
+            }
+            Ok(None) => {
+                tracing::warn!("Main task: reader task disconnected, job_id={}", job_id);
+                break;
+            }
+            Err(_) => {
+                // Timeout waiting for data - this is normal, continue loop to check elapsed time
+                continue;
+            }
+        }
+    }
+
+    if switched_to_async {
+        tracing::info!(
+            "Command switched to async mode: job_id={}, elapsed={:.2}s, output_so_far={} bytes",
+            job_id,
+            start_time.elapsed().as_secs_f64(),
+            output.len()
+        );
+
+        // Spawn background task to continue monitoring
+        let job_manager_clone = job_manager.clone();
+        let job_id_clone = job_id.clone();
+        let timeout_remaining = timeout.map(|t| t.saturating_sub(start_time.elapsed()));
+        let child_arc = Arc::new(tokio::sync::Mutex::new(child));
+
+        tokio::spawn(async move {
+            tracing::debug!("Background task started for job_id={}", job_id_clone);
+            let start_bg = Instant::now();
+
+            // Continue receiving from the reader task channel
+            loop {
+                // Check for timeout (if set)
+                if let Some(timeout_dur) = timeout_remaining {
+                    if start_bg.elapsed() > timeout_dur {
+                        let mut child_guard = child_arc.lock().await;
+                        let _ = child_guard.kill();
+                        drop(child_guard);
+                        job_manager_clone.complete_job(&job_id_clone, None, JobStatus::TimedOut);
+                        break;
+                    }
+                }
+
+                match tokio::time::timeout(Duration::from_millis(100), rx.recv()).await {
+                    Ok(Some(ReadMsg::Data(data))) => {
+                        let output_str = String::from_utf8_lossy(&data).to_string();
+                        job_manager_clone.append_output(&job_id_clone, &output_str, output_limit);
+                    }
+                    Ok(Some(ReadMsg::Eof)) => {
+                        // Process finished
+                        let mut child_guard = child_arc.lock().await;
+                        let exit_status = child_guard.wait().ok();
+                        let exit_code = exit_status.map(|s| s.exit_code() as i32);
+                        let status = if exit_code == Some(0) {
+                            JobStatus::Completed
+                        } else {
+                            JobStatus::Failed
+                        };
+                        tracing::debug!(
+                            "Background job completed: job_id={}, exit_code={:?}, status={:?}",
+                            job_id_clone,
+                            exit_code,
+                            status
+                        );
+                        job_manager_clone.complete_job(&job_id_clone, exit_code, status);
+                        break;
+                    }
+                    Ok(Some(ReadMsg::Error)) => {
+                        job_manager_clone.complete_job(&job_id_clone, None, JobStatus::Failed);
+                        break;
+                    }
+                    Ok(None) => {
+                        // Reader task died unexpectedly
+                        job_manager_clone.complete_job(&job_id_clone, None, JobStatus::Failed);
+                        break;
+                    }
+                    Err(_) => {
+                        // Timeout waiting for data, continue loop to check timeout
+                        continue;
+                    }
+                }
+            }
+        });
+
+        // Return immediately with current output and duration so far
+        let mut output_str = String::from_utf8_lossy(&output).to_string();
+        let duration_secs = start_time.elapsed().as_secs_f64();
+
+        if sudo_looks_used(command) {
+            if let Some(report) = sudo_prime_report {
+                let mut diag = String::new();
+                diag.push_str("\n\n[SUDO_PRIME]\n");
+                diag.push_str(&format!("success: {}\n", report.success));
+                if let Some(code) = report.exit_code {
+                    diag.push_str(&format!("exit_code: {}\n", code));
+                }
+                if let Some(askpass) = report.askpass {
+                    diag.push_str(&format!("askpass: {}\n", askpass));
+                }
+                if let Some(v) = report.display {
+                    diag.push_str(&format!("DISPLAY: {}\n", v));
+                }
+                if let Some(v) = report.wayland_display {
+                    diag.push_str(&format!("WAYLAND_DISPLAY: {}\n", v));
+                }
+                if let Some(v) = report.xdg_runtime_dir {
+                    diag.push_str(&format!("XDG_RUNTIME_DIR: {}\n", v));
+                }
+                if let Some(v) = report.dbus_session_bus_address {
+                    diag.push_str(&format!("DBUS_SESSION_BUS_ADDRESS: {}\n", v));
+                }
+                if !report.stderr.trim().is_empty() {
+                    diag.push_str("stderr:\n");
+                    diag.push_str(report.stderr.trim());
+                    diag.push('\n');
+                }
+                output_str.push_str(&diag);
+            }
+        }
+
+        tracing::info!(
+            "Returning async result: job_id={}, duration={:.2}s",
+            job_id,
+            duration_secs
+        );
+        return Ok(ExecutionResult {
+            job_id,
+            command: command.to_string(),
+            working_directory: cwd.display().to_string(),
+            exit_code: None,
+            success: false,
+            output: output_str,
+            truncated,
+            timed_out: false,
+            switched_to_async: true,
+            denied: false,
+            denial_reason: None,
+            duration_secs: Some(duration_secs),
+        });
+    }
+
+    // Synchronous completion
+    let exit_status = child.wait().ok();
+    let exit_code = exit_status.map(|s| s.exit_code() as i32);
+    let success = exit_code.map(|c| c == 0).unwrap_or(false);
+
+    let mut output_str = String::from_utf8_lossy(&output).to_string();
+
+    // Complete job
+    let status = if timed_out {
+        JobStatus::TimedOut
+    } else if success {
+        JobStatus::Completed
+    } else {
+        JobStatus::Failed
+    };
+    job_manager.complete_job(&job_id, exit_code, status);
+
+    let duration_secs = start_time.elapsed().as_secs_f64();
+
+    tracing::debug!(
+        "Synchronous command completed: job_id={}, exit_code={:?}, duration={:.2}s",
+        job_id,
+        exit_code,
+        duration_secs
+    );
+
+    if sudo_looks_used(command) {
+        if let Some(report) = sudo_prime_report {
+            let mut diag = String::new();
+            diag.push_str("\n\n[SUDO_PRIME]\n");
+            diag.push_str(&format!("success: {}\n", report.success));
+            if let Some(code) = report.exit_code {
+                diag.push_str(&format!("exit_code: {}\n", code));
+            }
+            if let Some(askpass) = report.askpass {
+                diag.push_str(&format!("askpass: {}\n", askpass));
+            }
+            if let Some(v) = report.display {
+                diag.push_str(&format!("DISPLAY: {}\n", v));
+            }
+            if let Some(v) = report.wayland_display {
+                diag.push_str(&format!("WAYLAND_DISPLAY: {}\n", v));
+            }
+            if let Some(v) = report.xdg_runtime_dir {
+                diag.push_str(&format!("XDG_RUNTIME_DIR: {}\n", v));
+            }
+            if let Some(v) = report.dbus_session_bus_address {
+                diag.push_str(&format!("DBUS_SESSION_BUS_ADDRESS: {}\n", v));
+            }
+            if !report.stderr.trim().is_empty() {
+                diag.push_str("stderr:\n");
+                diag.push_str(report.stderr.trim());
+                diag.push('\n');
+            }
+            output_str.push_str(&diag);
+        }
+    }
+
+    Ok(ExecutionResult {
+        job_id,
+        command: command.to_string(),
+        working_directory: cwd.display().to_string(),
+        exit_code,
+        success,
+        output: output_str,
+        truncated,
+        timed_out,
+        switched_to_async: false,
+        denied: false,
+        denial_reason: None,
+        duration_secs: Some(duration_secs),
+    })
+}
+
 static SUDO_KEEPALIVE_TASK: OnceLock<TokioMutex<bool>> = OnceLock::new();
 static SUDO_PRIME_LAST: OnceLock<TokioMutex<Option<SudoPrimeReport>>> = OnceLock::new();
 
@@ -614,6 +1028,90 @@ fn env_bool(name: &str) -> bool {
             .as_str(),
         "1" | "true" | "yes" | "on"
     )
+}
+
+async fn ensure_sudo_primed_for_wrap(
+    _command: &str,
+    env_vars: &std::collections::HashMap<String, String>,
+) -> Option<SudoPrimeReport> {
+    if !env_bool("ENHANCED_TERMINAL_SUDO_KEEPALIVE_PRIME") {
+        return None;
+    }
+
+    // If already cached in server context, don't prompt/prime again.
+    let need_prime = tokio::process::Command::new("sudo")
+        .arg("-n")
+        .arg("-v")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .map(|s| !s.success())
+        .unwrap_or(true);
+
+    if !need_prime {
+        return None;
+    }
+
+    // Prefer server env askpass, then per-command env
+    let askpass = env_string("ENHANCED_TERMINAL_SUDO_ASKPASS")
+        .or_else(|| env_string("SUDO_ASKPASS"))
+        .or_else(|| env_vars.get("SUDO_ASKPASS").cloned());
+
+    if let Some(askpass) = askpass {
+        tracing::info!("sudo wrap: priming sudo credentials via askpass (command contains sudo)");
+        let _ok = sudo_prime_with_askpass(&askpass, env_vars).await;
+        return take_sudo_prime_report().await;
+    }
+
+    record_sudo_prime_report(SudoPrimeReport {
+        success: false,
+        askpass: None,
+        display: env_string("DISPLAY"),
+        wayland_display: env_string("WAYLAND_DISPLAY"),
+        xdg_runtime_dir: env_string("XDG_RUNTIME_DIR"),
+        dbus_session_bus_address: env_string("DBUS_SESSION_BUS_ADDRESS"),
+        exit_code: None,
+        stderr: "sudo wrap: priming enabled but no askpass configured".to_string(),
+    })
+    .await;
+
+    take_sudo_prime_report().await
+}
+
+fn wrap_sudo_command_for_server(command: &str) -> String {
+    // Replace any sudo invocation with a non-interactive sudo so the command never prompts.
+    // This is a best-effort string rewrite; it intentionally stays conservative.
+    //
+    // Examples:
+    // - "sudo apt update" -> "sudo -n apt update"
+    // - "cmd && sudo id"  -> "cmd && sudo -n id"
+    //
+    // This does not attempt to perfectly parse shell syntax.
+    // It is opt-in and intended for workflows where you control the command content.
+    let mut out = command.to_string();
+
+    // Start-of-command "sudo "
+    if out.starts_with("sudo ") {
+        out = out.replacen("sudo ", "sudo -n ", 1);
+    }
+
+    // Common separators that can precede sudo. Keep spaces to reduce false positives.
+    for pat in [
+        "&& sudo ",
+        "|| sudo ",
+        "; sudo ",
+        "\n sudo ",
+        "\n\tsudo ",
+        "\tsudo ",
+    ] {
+        if out.contains(pat) {
+            out = out.replace(pat, &pat.replace("sudo ", "sudo -n "));
+        }
+    }
+
+    out
 }
 
 fn env_u64(name: &str, default_value: u64) -> u64 {
