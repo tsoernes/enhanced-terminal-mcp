@@ -433,26 +433,81 @@ fn env_string(name: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-async fn sudo_prime_with_askpass(askpass: &str) -> bool {
+fn default_gnome_session_env(
+    env_vars: &std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<&'static str, String> {
+    // Provide sane defaults for GNOME/Wayland GUI askpass helpers.
+    // These are only used when priming via `sudo -A -v` in the server context.
+    let mut out = std::collections::HashMap::new();
+
+    let display = env_string("DISPLAY")
+        .or_else(|| env_vars.get("DISPLAY").cloned())
+        .unwrap_or_else(|| ":0".to_string());
+    out.insert("DISPLAY", display);
+
+    let wayland = env_string("WAYLAND_DISPLAY")
+        .or_else(|| env_vars.get("WAYLAND_DISPLAY").cloned())
+        .unwrap_or_else(|| "wayland-0".to_string());
+    out.insert("WAYLAND_DISPLAY", wayland);
+
+    // These are often required for GUI dialogs under Wayland
+    if let Some(xdg) =
+        env_string("XDG_RUNTIME_DIR").or_else(|| env_vars.get("XDG_RUNTIME_DIR").cloned())
+    {
+        out.insert("XDG_RUNTIME_DIR", xdg);
+    }
+    if let Some(dbus) = env_string("DBUS_SESSION_BUS_ADDRESS")
+        .or_else(|| env_vars.get("DBUS_SESSION_BUS_ADDRESS").cloned())
+    {
+        out.insert("DBUS_SESSION_BUS_ADDRESS", dbus);
+    }
+
+    out
+}
+
+async fn sudo_prime_with_askpass(
+    askpass: &str,
+    env_vars: &std::collections::HashMap<String, String>,
+) -> bool {
     // Prime sudo credentials once using askpass (may prompt).
     // This runs in the server process context (not the PTY), so the sudo timestamp
     // is shared across subsequent tool invocations.
-    let status = tokio::process::Command::new("sudo")
-        .arg("-A")
-        .arg("-v")
-        .env("SUDO_ASKPASS", askpass)
-        .env("DISPLAY", env_string("DISPLAY").unwrap_or_default())
-        .env(
-            "WAYLAND_DISPLAY",
-            env_string("WAYLAND_DISPLAY").unwrap_or_default(),
-        )
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await;
+    let session_env = default_gnome_session_env(env_vars);
 
-    matches!(status, Ok(s) if s.success())
+    let mut cmd = tokio::process::Command::new("sudo");
+    cmd.arg("-A").arg("-v");
+    cmd.env("SUDO_ASKPASS", askpass);
+
+    for (k, v) in session_env {
+        cmd.env(k, v);
+    }
+
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let output = cmd.output().await;
+
+    match output {
+        Ok(out) => {
+            if out.status.success() {
+                tracing::info!("sudo keepalive: sudo -A -v succeeded");
+                true
+            } else {
+                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                tracing::warn!(
+                    "sudo keepalive: sudo -A -v failed (status={:?}) stderr={}",
+                    out.status.code(),
+                    stderr.trim()
+                );
+                false
+            }
+        }
+        Err(e) => {
+            tracing::warn!("sudo keepalive: failed to run sudo -A -v: {}", e);
+            false
+        }
+    }
 }
 
 fn env_bool(name: &str) -> bool {
@@ -518,7 +573,7 @@ async fn maybe_start_sudo_keepalive(
 
             if let Some(askpass) = askpass {
                 tracing::info!("sudo keepalive: priming sudo credentials via askpass");
-                let ok = sudo_prime_with_askpass(&askpass).await;
+                let ok = sudo_prime_with_askpass(&askpass, env_vars).await;
                 if ok {
                     tracing::info!("sudo keepalive: sudo credentials primed");
                 } else {

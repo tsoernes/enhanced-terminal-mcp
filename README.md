@@ -59,6 +59,19 @@ A standalone Model Context Protocol (MCP) server that provides terminal executio
 git clone <repository-url>
 # enhanced-terminal-mcp
 
+## Sudo priming: default GNOME/Wayland session env behavior
+
+When `ENHANCED_TERMINAL_SUDO_KEEPALIVE_PRIME=1` is enabled, the server may run `sudo -A -v` in the server process context (using askpass) to establish a sudo timestamp that can be reused across multiple tool invocations.
+
+To make GUI askpass work on GNOME/Wayland, the server will try to pass through common session variables to the priming subprocess:
+
+- `DISPLAY` (defaults to `:0` if missing)
+- `WAYLAND_DISPLAY` (defaults to `wayland-0` if missing)
+- `XDG_RUNTIME_DIR` (if available)
+- `DBUS_SESSION_BUS_ADDRESS` (if available)
+
+You can still override any of these by setting them explicitly in the MCP server’s environment configuration.
+
 ## Sudo / Askpass workflow (avoid repeated GUI password prompts)
 
 If you’re using a GUI askpass helper (common on GNOME) with `sudo -A`, you can avoid being prompted repeatedly by using sudo’s timestamp caching.
@@ -113,11 +126,24 @@ If you don’t set an askpass path in the server environment, priming can also u
 Notes:
 - Keepalive is only started when you run a command that contains/starts with `sudo`.
 - Priming may prompt once via askpass (`sudo -A -v`); keepalive itself never prompts (`sudo -n -v`).
+- For GUI askpass on GNOME/Wayland, ensure the server environment includes (or can infer) `DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`, and `DBUS_SESSION_BUS_ADDRESS`.
 - Keeping sudo alive for long periods has security implications. Prefer priming once and rely on your normal sudo timeout unless you explicitly need keepalive.
 
 ### Changing the sudo timeout (system policy)
 
 The duration of sudo caching is controlled by your system’s sudo policy (e.g. `timestamp_timeout`). If you want ~1 hour caching, adjust sudoers via `visudo` (system-wide decision).
+
+### Debugging priming/keepalive
+
+If priming isn’t working, enable server logging and look for messages about `sudo -A -v` success/failure:
+
+```bash
+export RUST_LOG=info
+# or for more detail:
+export RUST_LOG=debug
+```
+
+You should see log lines indicating whether the priming step succeeded and any stderr from `sudo -A -v` when it fails.
 cargo build --release
 ```
 
