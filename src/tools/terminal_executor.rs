@@ -89,7 +89,7 @@ pub async fn execute_command(
         input.force_sync
     );
 
-    maybe_start_sudo_keepalive(command, &input.env_vars).await;
+    let sudo_prime_report = maybe_start_sudo_keepalive(command, &input.env_vars).await;
 
     if command.is_empty() {
         return Err(anyhow::anyhow!("Command cannot be empty"));
@@ -383,7 +383,7 @@ pub async fn execute_command(
     let exit_code = exit_status.map(|s| s.exit_code() as i32);
     let success = exit_code.map(|c| c == 0).unwrap_or(false);
 
-    let output_str = String::from_utf8_lossy(&output).to_string();
+    let mut output_str = String::from_utf8_lossy(&output).to_string();
 
     // Complete job
     let status = if timed_out {
@@ -404,6 +404,43 @@ pub async fn execute_command(
         duration_secs
     );
 
+    // If this command used sudo, surface any priming attempt diagnostics in the output.
+    // This makes failures visible even when MCP server logs aren't easily accessible.
+    //
+    // Note: we only surface the report produced by the keepalive/priming attempt for *this*
+    // command invocation to avoid introducing extra async plumbing or dependencies.
+    if sudo_looks_used(command) {
+        if let Some(report) = sudo_prime_report {
+            let mut diag = String::new();
+            diag.push_str("\n\n[SUDO_PRIME]\n");
+            diag.push_str(&format!("success: {}\n", report.success));
+            if let Some(code) = report.exit_code {
+                diag.push_str(&format!("exit_code: {}\n", code));
+            }
+            if let Some(askpass) = report.askpass {
+                diag.push_str(&format!("askpass: {}\n", askpass));
+            }
+            if let Some(v) = report.display {
+                diag.push_str(&format!("DISPLAY: {}\n", v));
+            }
+            if let Some(v) = report.wayland_display {
+                diag.push_str(&format!("WAYLAND_DISPLAY: {}\n", v));
+            }
+            if let Some(v) = report.xdg_runtime_dir {
+                diag.push_str(&format!("XDG_RUNTIME_DIR: {}\n", v));
+            }
+            if let Some(v) = report.dbus_session_bus_address {
+                diag.push_str(&format!("DBUS_SESSION_BUS_ADDRESS: {}\n", v));
+            }
+            if !report.stderr.trim().is_empty() {
+                diag.push_str("stderr:\n");
+                diag.push_str(report.stderr.trim());
+                diag.push('\n');
+            }
+            output_str.push_str(&diag);
+        }
+    }
+
     Ok(ExecutionResult {
         job_id,
         command: command.to_string(),
@@ -421,6 +458,19 @@ pub async fn execute_command(
 }
 
 static SUDO_KEEPALIVE_TASK: OnceLock<TokioMutex<bool>> = OnceLock::new();
+static SUDO_PRIME_LAST: OnceLock<TokioMutex<Option<SudoPrimeReport>>> = OnceLock::new();
+
+#[derive(Debug, Clone)]
+struct SudoPrimeReport {
+    success: bool,
+    askpass: Option<String>,
+    display: Option<String>,
+    wayland_display: Option<String>,
+    xdg_runtime_dir: Option<String>,
+    dbus_session_bus_address: Option<String>,
+    exit_code: Option<i32>,
+    stderr: String,
+}
 
 fn sudo_looks_used(command: &str) -> bool {
     command.contains("sudo ") || command.starts_with("sudo")
@@ -465,6 +515,18 @@ fn default_gnome_session_env(
     out
 }
 
+async fn record_sudo_prime_report(report: SudoPrimeReport) {
+    let cell = SUDO_PRIME_LAST.get_or_init(|| TokioMutex::new(None));
+    let mut guard = cell.lock().await;
+    *guard = Some(report);
+}
+
+async fn take_sudo_prime_report() -> Option<SudoPrimeReport> {
+    let cell = SUDO_PRIME_LAST.get_or_init(|| TokioMutex::new(None));
+    let mut guard = cell.lock().await;
+    guard.take()
+}
+
 async fn sudo_prime_with_askpass(
     askpass: &str,
     env_vars: &std::collections::HashMap<String, String>,
@@ -474,11 +536,16 @@ async fn sudo_prime_with_askpass(
     // is shared across subsequent tool invocations.
     let session_env = default_gnome_session_env(env_vars);
 
+    let display = session_env.get("DISPLAY").cloned();
+    let wayland_display = session_env.get("WAYLAND_DISPLAY").cloned();
+    let xdg_runtime_dir = session_env.get("XDG_RUNTIME_DIR").cloned();
+    let dbus_session_bus_address = session_env.get("DBUS_SESSION_BUS_ADDRESS").cloned();
+
     let mut cmd = tokio::process::Command::new("sudo");
     cmd.arg("-A").arg("-v");
     cmd.env("SUDO_ASKPASS", askpass);
 
-    for (k, v) in session_env {
+    for (k, v) in &session_env {
         cmd.env(k, v);
     }
 
@@ -490,21 +557,49 @@ async fn sudo_prime_with_askpass(
 
     match output {
         Ok(out) => {
-            if out.status.success() {
+            let success = out.status.success();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let exit_code = out.status.code();
+
+            if success {
                 tracing::info!("sudo keepalive: sudo -A -v succeeded");
-                true
             } else {
-                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
                 tracing::warn!(
                     "sudo keepalive: sudo -A -v failed (status={:?}) stderr={}",
-                    out.status.code(),
+                    exit_code,
                     stderr.trim()
                 );
-                false
             }
+
+            record_sudo_prime_report(SudoPrimeReport {
+                success,
+                askpass: Some(askpass.to_string()),
+                display,
+                wayland_display,
+                xdg_runtime_dir,
+                dbus_session_bus_address,
+                exit_code,
+                stderr,
+            })
+            .await;
+
+            success
         }
         Err(e) => {
             tracing::warn!("sudo keepalive: failed to run sudo -A -v: {}", e);
+
+            record_sudo_prime_report(SudoPrimeReport {
+                success: false,
+                askpass: Some(askpass.to_string()),
+                display: env_string("DISPLAY"),
+                wayland_display: env_string("WAYLAND_DISPLAY"),
+                xdg_runtime_dir: env_string("XDG_RUNTIME_DIR"),
+                dbus_session_bus_address: env_string("DBUS_SESSION_BUS_ADDRESS"),
+                exit_code: None,
+                stderr: e.to_string(),
+            })
+            .await;
+
             false
         }
     }
@@ -531,7 +626,7 @@ fn env_u64(name: &str, default_value: u64) -> u64 {
 async fn maybe_start_sudo_keepalive(
     command: &str,
     env_vars: &std::collections::HashMap<String, String>,
-) {
+) -> Option<SudoPrimeReport> {
     // Opt-in via env:
     // - ENHANCED_TERMINAL_SUDO_KEEPALIVE=1 enables keepalive behavior
     // - ENHANCED_TERMINAL_SUDO_KEEPALIVE_REFRESH_SECS controls refresh interval (default 300s)
@@ -543,10 +638,10 @@ async fn maybe_start_sudo_keepalive(
     // Keepalive:
     // - Background task periodically runs `sudo -n -v` to refresh the sudo timestamp (no prompt).
     if !env_bool("ENHANCED_TERMINAL_SUDO_KEEPALIVE") {
-        return;
+        return None;
     }
     if !sudo_looks_used(command) {
-        return;
+        return None;
     }
 
     // Prime once (optional) in the long-lived server context
@@ -573,16 +668,25 @@ async fn maybe_start_sudo_keepalive(
 
             if let Some(askpass) = askpass {
                 tracing::info!("sudo keepalive: priming sudo credentials via askpass");
-                let ok = sudo_prime_with_askpass(&askpass, env_vars).await;
-                if ok {
-                    tracing::info!("sudo keepalive: sudo credentials primed");
-                } else {
-                    tracing::warn!("sudo keepalive: failed to prime sudo credentials");
-                }
+                let _ok = sudo_prime_with_askpass(&askpass, env_vars).await;
+                // Report is stored; return it so caller can surface it in output.
+                return take_sudo_prime_report().await;
             } else {
                 tracing::warn!(
                     "sudo keepalive: priming enabled but no askpass configured (set ENHANCED_TERMINAL_SUDO_ASKPASS or SUDO_ASKPASS)"
                 );
+                record_sudo_prime_report(SudoPrimeReport {
+                    success: false,
+                    askpass: None,
+                    display: env_string("DISPLAY"),
+                    wayland_display: env_string("WAYLAND_DISPLAY"),
+                    xdg_runtime_dir: env_string("XDG_RUNTIME_DIR"),
+                    dbus_session_bus_address: env_string("DBUS_SESSION_BUS_ADDRESS"),
+                    exit_code: None,
+                    stderr: "no askpass configured".to_string(),
+                })
+                .await;
+                return take_sudo_prime_report().await;
             }
         }
     }
@@ -591,7 +695,7 @@ async fn maybe_start_sudo_keepalive(
     let gate = SUDO_KEEPALIVE_TASK.get_or_init(|| TokioMutex::new(false));
     let mut started = gate.lock().await;
     if *started {
-        return;
+        return None;
     }
     *started = true;
     drop(started);
@@ -630,4 +734,5 @@ async fn maybe_start_sudo_keepalive(
             }
         }
     });
+    None
 }
