@@ -89,7 +89,7 @@ pub async fn execute_command(
         input.force_sync
     );
 
-    maybe_start_sudo_keepalive(command).await;
+    maybe_start_sudo_keepalive(command, &input.env_vars).await;
 
     if command.is_empty() {
         return Err(anyhow::anyhow!("Command cannot be empty"));
@@ -422,6 +422,39 @@ pub async fn execute_command(
 
 static SUDO_KEEPALIVE_TASK: OnceLock<TokioMutex<bool>> = OnceLock::new();
 
+fn sudo_looks_used(command: &str) -> bool {
+    command.contains("sudo ") || command.starts_with("sudo")
+}
+
+fn env_string(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+async fn sudo_prime_with_askpass(askpass: &str) -> bool {
+    // Prime sudo credentials once using askpass (may prompt).
+    // This runs in the server process context (not the PTY), so the sudo timestamp
+    // is shared across subsequent tool invocations.
+    let status = tokio::process::Command::new("sudo")
+        .arg("-A")
+        .arg("-v")
+        .env("SUDO_ASKPASS", askpass)
+        .env("DISPLAY", env_string("DISPLAY").unwrap_or_default())
+        .env(
+            "WAYLAND_DISPLAY",
+            env_string("WAYLAND_DISPLAY").unwrap_or_default(),
+        )
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+
+    matches!(status, Ok(s) if s.success())
+}
+
 fn env_bool(name: &str) -> bool {
     matches!(
         std::env::var(name)
@@ -440,26 +473,66 @@ fn env_u64(name: &str, default_value: u64) -> u64 {
         .unwrap_or(default_value)
 }
 
-async fn maybe_start_sudo_keepalive(command: &str) {
+async fn maybe_start_sudo_keepalive(
+    command: &str,
+    env_vars: &std::collections::HashMap<String, String>,
+) {
     // Opt-in via env:
     // - ENHANCED_TERMINAL_SUDO_KEEPALIVE=1 enables keepalive behavior
     // - ENHANCED_TERMINAL_SUDO_KEEPALIVE_REFRESH_SECS controls refresh interval (default 300s)
     //
-    // Behavior:
-    // - If enabled and the command looks like it uses sudo, start a background task that
-    //   periodically runs `sudo -n -v` to refresh the sudo timestamp (no prompt).
-    // - This reduces repeated GUI askpass prompts when the user has already authenticated once
-    //   (e.g. via a prior `sudo -A -v` or `sudo` invocation in an interactive session).
+    // Priming:
+    // - If enabled, command uses sudo, and `sudo -n -v` fails (no cached timestamp),
+    //   optionally prime credentials once via `sudo -A -v` using an askpass helper.
+    //
+    // Keepalive:
+    // - Background task periodically runs `sudo -n -v` to refresh the sudo timestamp (no prompt).
     if !env_bool("ENHANCED_TERMINAL_SUDO_KEEPALIVE") {
         return;
     }
-
-    // Only start keepalive if the user is actually using sudo in commands.
-    // This keeps the feature scoped and less surprising.
-    if !command.contains("sudo ") && !command.starts_with("sudo") {
+    if !sudo_looks_used(command) {
         return;
     }
 
+    // Prime once (optional) in the long-lived server context
+    // Askpass resolution order:
+    // 1) ENHANCED_TERMINAL_SUDO_ASKPASS (server env)
+    // 2) SUDO_ASKPASS (server env)
+    // 3) env_vars["SUDO_ASKPASS"] (per-tool env passed by client)
+    if env_bool("ENHANCED_TERMINAL_SUDO_KEEPALIVE_PRIME") {
+        let need_prime = tokio::process::Command::new("sudo")
+            .arg("-n")
+            .arg("-v")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .map(|s| !s.success())
+            .unwrap_or(true);
+
+        if need_prime {
+            let askpass = env_string("ENHANCED_TERMINAL_SUDO_ASKPASS")
+                .or_else(|| env_string("SUDO_ASKPASS"))
+                .or_else(|| env_vars.get("SUDO_ASKPASS").cloned());
+
+            if let Some(askpass) = askpass {
+                tracing::info!("sudo keepalive: priming sudo credentials via askpass");
+                let ok = sudo_prime_with_askpass(&askpass).await;
+                if ok {
+                    tracing::info!("sudo keepalive: sudo credentials primed");
+                } else {
+                    tracing::warn!("sudo keepalive: failed to prime sudo credentials");
+                }
+            } else {
+                tracing::warn!(
+                    "sudo keepalive: priming enabled but no askpass configured (set ENHANCED_TERMINAL_SUDO_ASKPASS or SUDO_ASKPASS)"
+                );
+            }
+        }
+    }
+
+    // Start keepalive loop at most once
     let gate = SUDO_KEEPALIVE_TASK.get_or_init(|| TokioMutex::new(false));
     let mut started = gate.lock().await;
     if *started {
@@ -480,7 +553,6 @@ async fn maybe_start_sudo_keepalive(command: &str) {
             tokio::time::sleep(interval).await;
 
             // `sudo -n -v` refreshes timestamp if already authenticated; fails if it would prompt.
-            // We ignore failures so we don't spam logs or crash; the next sudo call will prompt normally.
             let status = tokio::process::Command::new("sudo")
                 .arg("-n")
                 .arg("-v")

@@ -85,9 +85,34 @@ export ENHANCED_TERMINAL_SUDO_KEEPALIVE=1
 export ENHANCED_TERMINAL_SUDO_KEEPALIVE_REFRESH_SECS=300
 ```
 
+### Optional: prime sudo once from the server process (opt-in)
+
+Because the server runs in its own long-lived process, priming sudo there can make the sudo timestamp usable across multiple tool invocations (instead of prompting each time).
+
+Enable priming with:
+
+```bash
+export ENHANCED_TERMINAL_SUDO_KEEPALIVE=1
+export ENHANCED_TERMINAL_SUDO_KEEPALIVE_PRIME=1
+```
+
+Configure the askpass helper path using either:
+
+```bash
+export ENHANCED_TERMINAL_SUDO_ASKPASS=/path/to/askpass.sh
+```
+
+or:
+
+```bash
+export SUDO_ASKPASS=/path/to/askpass.sh
+```
+
+If you don’t set an askpass path in the server environment, priming can also use a per-command `SUDO_ASKPASS` provided by the client environment variables.
+
 Notes:
 - Keepalive is only started when you run a command that contains/starts with `sudo`.
-- Keepalive never prompts; it uses `sudo -n -v` and simply stops being effective once the timestamp expires.
+- Priming may prompt once via askpass (`sudo -A -v`); keepalive itself never prompts (`sudo -n -v`).
 - Keeping sudo alive for long periods has security implications. Prefer priming once and rely on your normal sudo timeout unless you explicitly need keepalive.
 
 ### Changing the sudo timeout (system policy)
