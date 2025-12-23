@@ -57,7 +57,42 @@ A standalone Model Context Protocol (MCP) server that provides terminal executio
 
 ```bash
 git clone <repository-url>
-cd enhanced-terminal-mcp
+# enhanced-terminal-mcp
+
+## Sudo / Askpass workflow (avoid repeated GUI password prompts)
+
+If you’re using a GUI askpass helper (common on GNOME) with `sudo -A`, you can avoid being prompted repeatedly by using sudo’s timestamp caching.
+
+### Recommended workflow: prime sudo once per session
+
+Run this once (it will prompt you via your askpass helper):
+
+```bash
+env SUDO_ASKPASS=/path/to/askpass.sh sudo -A -v
+```
+
+After that, subsequent `sudo -A ...` calls will typically not prompt again until the sudo timestamp expires (configured by your sudo policy).
+
+### Optional: keep sudo timestamp warm (opt-in)
+
+This server supports an opt-in keepalive that periodically runs `sudo -n -v` (non-interactive) to refresh the sudo timestamp when it is already cached.
+
+Enable it with:
+
+```bash
+export ENHANCED_TERMINAL_SUDO_KEEPALIVE=1
+# Optional: refresh interval in seconds (default 300, minimum 30)
+export ENHANCED_TERMINAL_SUDO_KEEPALIVE_REFRESH_SECS=300
+```
+
+Notes:
+- Keepalive is only started when you run a command that contains/starts with `sudo`.
+- Keepalive never prompts; it uses `sudo -n -v` and simply stops being effective once the timestamp expires.
+- Keeping sudo alive for long periods has security implications. Prefer priming once and rely on your normal sudo timeout unless you explicitly need keepalive.
+
+### Changing the sudo timeout (system policy)
+
+The duration of sudo caching is controlled by your system’s sudo policy (e.g. `timestamp_timeout`). If you want ~1 hour caching, adjust sudoers via `visudo` (system-wide decision).
 cargo build --release
 ```
 

@@ -4,9 +4,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex as TokioMutex, mpsc};
 
 use super::denylist::{find_matched_pattern, is_denied};
 use super::job_manager::{JobManager, JobStatus};
@@ -88,6 +88,8 @@ pub async fn execute_command(
         input.async_threshold_secs,
         input.force_sync
     );
+
+    maybe_start_sudo_keepalive(command).await;
 
     if command.is_empty() {
         return Err(anyhow::anyhow!("Command cannot be empty"));
@@ -416,4 +418,89 @@ pub async fn execute_command(
         denial_reason: None,
         duration_secs: Some(duration_secs),
     })
+}
+
+static SUDO_KEEPALIVE_TASK: OnceLock<TokioMutex<bool>> = OnceLock::new();
+
+fn env_bool(name: &str) -> bool {
+    matches!(
+        std::env::var(name)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn env_u64(name: &str, default_value: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(default_value)
+}
+
+async fn maybe_start_sudo_keepalive(command: &str) {
+    // Opt-in via env:
+    // - ENHANCED_TERMINAL_SUDO_KEEPALIVE=1 enables keepalive behavior
+    // - ENHANCED_TERMINAL_SUDO_KEEPALIVE_REFRESH_SECS controls refresh interval (default 300s)
+    //
+    // Behavior:
+    // - If enabled and the command looks like it uses sudo, start a background task that
+    //   periodically runs `sudo -n -v` to refresh the sudo timestamp (no prompt).
+    // - This reduces repeated GUI askpass prompts when the user has already authenticated once
+    //   (e.g. via a prior `sudo -A -v` or `sudo` invocation in an interactive session).
+    if !env_bool("ENHANCED_TERMINAL_SUDO_KEEPALIVE") {
+        return;
+    }
+
+    // Only start keepalive if the user is actually using sudo in commands.
+    // This keeps the feature scoped and less surprising.
+    if !command.contains("sudo ") && !command.starts_with("sudo") {
+        return;
+    }
+
+    let gate = SUDO_KEEPALIVE_TASK.get_or_init(|| TokioMutex::new(false));
+    let mut started = gate.lock().await;
+    if *started {
+        return;
+    }
+    *started = true;
+    drop(started);
+
+    let refresh_secs = env_u64("ENHANCED_TERMINAL_SUDO_KEEPALIVE_REFRESH_SECS", 300).max(30);
+    tracing::info!(
+        "Starting sudo keepalive task (refresh_secs={})",
+        refresh_secs
+    );
+
+    tokio::spawn(async move {
+        let interval = Duration::from_secs(refresh_secs);
+        loop {
+            tokio::time::sleep(interval).await;
+
+            // `sudo -n -v` refreshes timestamp if already authenticated; fails if it would prompt.
+            // We ignore failures so we don't spam logs or crash; the next sudo call will prompt normally.
+            let status = tokio::process::Command::new("sudo")
+                .arg("-n")
+                .arg("-v")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await;
+
+            match status {
+                Ok(s) if s.success() => {
+                    tracing::debug!("sudo keepalive refreshed timestamp");
+                }
+                Ok(_) => {
+                    tracing::debug!("sudo keepalive: no cached credentials (sudo -n -v failed)");
+                }
+                Err(e) => {
+                    tracing::warn!("sudo keepalive: failed to run sudo -n -v: {}", e);
+                }
+            }
+        }
+    });
 }
