@@ -1020,14 +1020,28 @@ async fn sudo_prime_with_askpass(
 }
 
 fn env_bool(name: &str) -> bool {
-    matches!(
-        std::env::var(name)
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+    // Default these features ON unless explicitly disabled.
+    // Supported values for true: 1/true/yes/on
+    // Supported values for false: 0/false/no/off
+    let default_true = matches!(
+        name,
+        "ENHANCED_TERMINAL_SUDO_KEEPALIVE"
+            | "ENHANCED_TERMINAL_SUDO_KEEPALIVE_PRIME"
+            | "ENHANCED_TERMINAL_SUDO_WRAP"
+    );
+
+    let raw = std::env::var(name).ok().unwrap_or_default();
+    let v = raw.trim().to_ascii_lowercase();
+
+    if v.is_empty() {
+        return default_true;
+    }
+
+    match v.as_str() {
+        "1" | "true" | "yes" | "on" => true,
+        "0" | "false" | "no" | "off" => false,
+        _ => default_true,
+    }
 }
 
 async fn ensure_sudo_primed_for_wrap(
@@ -1054,10 +1068,17 @@ async fn ensure_sudo_primed_for_wrap(
         return None;
     }
 
-    // Prefer server env askpass, then per-command env
+    // Prefer server env askpass, then per-command env, then a conventional default path.
     let askpass = env_string("ENHANCED_TERMINAL_SUDO_ASKPASS")
         .or_else(|| env_string("SUDO_ASKPASS"))
-        .or_else(|| env_vars.get("SUDO_ASKPASS").cloned());
+        .or_else(|| env_vars.get("SUDO_ASKPASS").cloned())
+        .or_else(|| {
+            Some(format!(
+                "{}/scripts/askpass-zenity.sh",
+                std::env::var("HOME").ok().unwrap_or_default()
+            ))
+        })
+        .filter(|p| !p.trim().is_empty());
 
     if let Some(askpass) = askpass {
         tracing::info!("sudo wrap: priming sudo credentials via askpass (command contains sudo)");
@@ -1162,7 +1183,14 @@ async fn maybe_start_sudo_keepalive(
         if need_prime {
             let askpass = env_string("ENHANCED_TERMINAL_SUDO_ASKPASS")
                 .or_else(|| env_string("SUDO_ASKPASS"))
-                .or_else(|| env_vars.get("SUDO_ASKPASS").cloned());
+                .or_else(|| env_vars.get("SUDO_ASKPASS").cloned())
+                .or_else(|| {
+                    Some(format!(
+                        "{}/scripts/askpass-zenity.sh",
+                        std::env::var("HOME").ok().unwrap_or_default()
+                    ))
+                })
+                .filter(|p| !p.trim().is_empty());
 
             if let Some(askpass) = askpass {
                 tracing::info!("sudo keepalive: priming sudo credentials via askpass");
