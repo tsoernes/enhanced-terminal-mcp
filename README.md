@@ -59,91 +59,82 @@ A standalone Model Context Protocol (MCP) server that provides terminal executio
 git clone <repository-url>
 # enhanced-terminal-mcp
 
-## Sudo priming: default GNOME/Wayland session env behavior
+## Sudo Workflow (Recommended)
 
-When `ENHANCED_TERMINAL_SUDO_KEEPALIVE_PRIME=1` is enabled, the server may run `sudo -A -v` in the server process context (using askpass) to establish a sudo timestamp that can be reused across multiple tool invocations.
+This server handles sudo commands automatically to avoid password prompts during tool execution:
 
-To make GUI askpass work on GNOME/Wayland, the server will try to pass through common session variables to the priming subprocess:
+1. **First sudo command**: Triggers an askpass dialog (via `sudo -A -v`) to authenticate once
+2. **Subsequent sudo commands**: Rewritten to `sudo -n` (non-interactive) and use the cached sudo timestamp
+3. **Keepalive**: Background task refreshes the timestamp every 5 minutes to keep it valid
 
-- `DISPLAY` (defaults to `:0` if missing)
-- `WAYLAND_DISPLAY` (defaults to `wayland-0` if missing)
-- `XDG_RUNTIME_DIR` (if available)
-- `DBUS_SESSION_BUS_ADDRESS` (if available)
+All of this is **enabled by default**. The `sudo_wrapper_applied` field in results shows when the `-n` flag was added.
 
-You can still override any of these by setting them explicitly in the MCP server’s environment configuration.
+### Recommended Setup: Sudoers Timestamp Sharing
 
-## Sudo / Askpass workflow (avoid repeated GUI password prompts)
+For the best experience, configure sudo to share timestamps across all your sessions (not just per-TTY):
 
-If you’re using a GUI askpass helper (common on GNOME) with `sudo -A`, you can avoid being prompted repeatedly by using sudo’s timestamp caching.
-
-### Recommended workflow: prime sudo once per session
-
-Run this once (it will prompt you via your askpass helper):
+1. Create `/etc/sudoers.d/enhanced-terminal-mcp` using `visudo`:
 
 ```bash
-env SUDO_ASKPASS=/path/to/askpass.sh sudo -A -v
+sudo visudo -f /etc/sudoers.d/enhanced-terminal-mcp
 ```
 
-After that, subsequent `sudo -A ...` calls will typically not prompt again until the sudo timestamp expires (configured by your sudo policy).
+2. Add these lines:
 
-### Optional: keep sudo timestamp warm (opt-in)
+```
+Defaults !tty_tickets
+Defaults timestamp_timeout=10
+Defaults use_pty
+```
 
-This server supports an opt-in keepalive that periodically runs `sudo -n -v` (non-interactive) to refresh the sudo timestamp when it is already cached.
+3. **Benefits**:
+   - Prime sudo **once** in any terminal: `sudo -v`
+   - The MCP server will reuse that timestamp automatically
+   - No askpass dialog needed (unless timestamp expires)
+   - Works across all your terminal sessions and the MCP server
 
-Enable it with:
+4. **Security note**: `!tty_tickets` means any process running as your user can reuse your sudo timestamp while it's valid. Keep `timestamp_timeout` reasonable (e.g., 10 minutes).
+
+### Alternative: Askpass-based Workflow (Default Behavior)
+
+If you prefer not to change sudoers, the server defaults will work:
+
+- **Default askpass path**: `~/scripts/askpass-zenity.sh`
+- **First sudo command** → askpass dialog
+- **Server keeps timestamp alive** → no more prompts
+
+The server will automatically pass through these env vars for GUI askpass:
+- `DISPLAY` (defaults to `:0`)
+- `WAYLAND_DISPLAY` (defaults to `wayland-0`)
+- `XDG_RUNTIME_DIR`
+- `DBUS_SESSION_BUS_ADDRESS`
+
+### Configuration (Optional)
+
+These environment variables control sudo behavior (all default to **ON**):
 
 ```bash
-export ENHANCED_TERMINAL_SUDO_KEEPALIVE=1
-# Optional: refresh interval in seconds (default 300, minimum 30)
-export ENHANCED_TERMINAL_SUDO_KEEPALIVE_REFRESH_SECS=300
+# Enable/disable sudo wrapping and keepalive (default: 1)
+ENHANCED_TERMINAL_SUDO_WRAP=1
+ENHANCED_TERMINAL_SUDO_KEEPALIVE=1
+ENHANCED_TERMINAL_SUDO_KEEPALIVE_PRIME=1
+
+# Custom askpass path (default: ~/scripts/askpass-zenity.sh)
+ENHANCED_TERMINAL_SUDO_ASKPASS=/path/to/your/askpass.sh
+
+# Keepalive refresh interval in seconds (default: 300, min: 30)
+ENHANCED_TERMINAL_SUDO_KEEPALIVE_REFRESH_SECS=300
 ```
 
-### Optional: prime sudo once from the server process (opt-in)
+### Debugging
 
-Because the server runs in its own long-lived process, priming sudo there can make the sudo timestamp usable across multiple tool invocations (instead of prompting each time).
-
-Enable priming with:
+Enable detailed logging to see sudo priming/wrapping behavior:
 
 ```bash
-export ENHANCED_TERMINAL_SUDO_KEEPALIVE=1
-export ENHANCED_TERMINAL_SUDO_KEEPALIVE_PRIME=1
+RUST_LOG=debug enhanced-terminal-mcp
 ```
 
-Configure the askpass helper path using either:
-
-```bash
-export ENHANCED_TERMINAL_SUDO_ASKPASS=/path/to/askpass.sh
-```
-
-or:
-
-```bash
-export SUDO_ASKPASS=/path/to/askpass.sh
-```
-
-If you don’t set an askpass path in the server environment, priming can also use a per-command `SUDO_ASKPASS` provided by the client environment variables.
-
-Notes:
-- Keepalive is only started when you run a command that contains/starts with `sudo`.
-- Priming may prompt once via askpass (`sudo -A -v`); keepalive itself never prompts (`sudo -n -v`).
-- For GUI askpass on GNOME/Wayland, ensure the server environment includes (or can infer) `DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`, and `DBUS_SESSION_BUS_ADDRESS`.
-- Keeping sudo alive for long periods has security implications. Prefer priming once and rely on your normal sudo timeout unless you explicitly need keepalive.
-
-### Changing the sudo timeout (system policy)
-
-The duration of sudo caching is controlled by your system’s sudo policy (e.g. `timestamp_timeout`). If you want ~1 hour caching, adjust sudoers via `visudo` (system-wide decision).
-
-### Debugging priming/keepalive
-
-If priming isn’t working, enable server logging and look for messages about `sudo -A -v` success/failure:
-
-```bash
-export RUST_LOG=info
-# or for more detail:
-export RUST_LOG=debug
-```
-
-You should see log lines indicating whether the priming step succeeded and any stderr from `sudo -A -v` when it fails.
+Look for log lines about `sudo -A -v` (priming) and `sudo -n` (wrapping).
 cargo build --release
 ```
 
