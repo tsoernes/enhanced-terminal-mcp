@@ -132,12 +132,15 @@ pub async fn execute_command(
         });
     }
 
-    // Resolve working directory
+    // Resolve working directory and canonicalize (resolve symlinks)
     let cwd = if input.cwd == "." || input.cwd.is_empty() {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     } else {
         PathBuf::from(&input.cwd)
     };
+
+    // Canonicalize to resolve symlinks
+    let cwd = cwd.canonicalize().unwrap_or(cwd);
 
     // Create PTY system
     let pty_system = native_pty_system();
@@ -517,12 +520,15 @@ async fn execute_command_inner(
         });
     }
 
-    // Resolve working directory
+    // Resolve working directory and canonicalize (resolve symlinks)
     let cwd = if input.cwd == "." || input.cwd.is_empty() {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
     } else {
         PathBuf::from(&input.cwd)
     };
+
+    // Canonicalize to resolve symlinks
+    let cwd = cwd.canonicalize().unwrap_or(cwd);
 
     // Create PTY system
     let pty_system = native_pty_system();
