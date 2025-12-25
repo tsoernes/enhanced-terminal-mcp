@@ -88,6 +88,7 @@ pub struct EnhancedTerminalServer {
     tool_router: ToolRouter<Self>,
     shell_info: String,
     job_manager: JobManager,
+    detected_shells: Vec<String>,
 }
 
 #[tool_router]
@@ -95,6 +96,8 @@ impl EnhancedTerminalServer {
     pub fn new() -> Self {
         // Detect shells at startup
         let shells = detect_shells();
+        let detected_shells: Vec<String> = shells.iter().map(|s| s.name.clone()).collect();
+
         let shell_info = if shells.is_empty() {
             "No shells detected.".to_string()
         } else {
@@ -116,6 +119,7 @@ impl EnhancedTerminalServer {
             tool_router: Self::tool_router(),
             shell_info,
             job_manager: JobManager::new(),
+            detected_shells,
         }
     }
 
@@ -169,8 +173,18 @@ RETURNS:
         &self,
         Parameters(input): Parameters<TerminalExecutionInput>,
     ) -> Result<CallToolResult, McpError> {
-        // Replace {shell_list} placeholder in description with actual shells
-        // (Note: This is done at runtime in the description, but we'll handle it in server instructions)
+        // Validate shell against detected shells
+        if !self.detected_shells.is_empty() && !self.detected_shells.contains(&input.shell) {
+            return Err(McpError::invalid_params(
+                format!(
+                    "Shell '{}' not found. Available shells: {}",
+                    input.shell,
+                    self.detected_shells.join(", ")
+                ),
+                None,
+            ));
+        }
+
         let result = execute_command(&input, &self.job_manager)
             .await
             .map_err(|e| {
