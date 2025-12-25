@@ -74,6 +74,8 @@ pub struct ExecutionResult {
     pub denied: bool,
     pub denial_reason: Option<String>,
     pub duration_secs: Option<f64>,
+    /// What was added/prepended to sudo commands (e.g., "-n" for non-interactive)
+    pub sudo_wrapper_applied: Option<String>,
 }
 
 pub async fn execute_command(
@@ -126,6 +128,7 @@ pub async fn execute_command(
                 matched_pattern.unwrap_or_else(|| "unknown".to_string())
             )),
             duration_secs: None,
+            sudo_wrapper_applied: None,
         });
     }
 
@@ -387,6 +390,11 @@ pub async fn execute_command(
             denied: false,
             denial_reason: None,
             duration_secs: Some(duration_secs),
+            sudo_wrapper_applied: if sudo_looks_used(command) {
+                Some("-n".to_string())
+            } else {
+                None
+            },
         });
     }
 
@@ -466,6 +474,11 @@ pub async fn execute_command(
         denied: false,
         denial_reason: None,
         duration_secs: Some(duration_secs),
+        sudo_wrapper_applied: if sudo_looks_used(command) {
+            Some("-n".to_string())
+        } else {
+            None
+        },
     })
 }
 
@@ -500,6 +513,7 @@ async fn execute_command_inner(
                 matched_pattern.unwrap_or_else(|| "unknown".to_string())
             )),
             duration_secs: None,
+            sudo_wrapper_applied: None,
         });
     }
 
@@ -794,6 +808,11 @@ async fn execute_command_inner(
             denied: false,
             denial_reason: None,
             duration_secs: Some(duration_secs),
+            sudo_wrapper_applied: if sudo_looks_used(command) {
+                Some("-n".to_string())
+            } else {
+                None
+            },
         });
     }
 
@@ -868,6 +887,11 @@ async fn execute_command_inner(
         denied: false,
         denial_reason: None,
         duration_secs: Some(duration_secs),
+        sudo_wrapper_applied: if sudo_looks_used(command) {
+            Some("-n".to_string())
+        } else {
+            None
+        },
     })
 }
 
