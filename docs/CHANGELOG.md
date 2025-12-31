@@ -28,6 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `detect_binaries` remains unchanged (no prefix needed)
 
 ### Added
+- **Streaming Output**: Real-time output notifications for `enhanced_terminal` in sync mode
+  - Clients receive `LoggingMessageNotification` updates as output is generated
+  - Provides immediate feedback during command execution
+  - Uses MCP's standard notification mechanism
+  - Backward compatible - clients that don't handle notifications still work
+  - Zero polling required - push-based updates
+  - Minimal overhead (~100-200 bytes JSON per chunk)
+  - See `docs/STREAMING_OUTPUT.md` for comprehensive guide
+  - See `docs/STREAMING_IMPLEMENTATION_SUMMARY.md` for technical details
 - **Job Tags and Metadata**: Enhanced job tracking with rich metadata
   - Add custom tags to jobs via `tags` parameter in `enhanced_terminal`
   - Automatic command summary generation (first 100 chars)
