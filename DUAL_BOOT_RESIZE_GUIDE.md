@@ -109,9 +109,16 @@ Expected result:
 Now we need to shrink the LUKS container to match the filesystem:
 
 ```bash
-# Calculate the new size in sectors
-# 398.7GB ≈ 428032409600 bytes ≈ 836000800 sectors (512 bytes each)
-# Use 398GB to be safe: 427737899008 bytes = 835620896 sectors
+# IMPORTANT: Partition tools below use sector units.
+# Units: sectors of 1 * 512 = 512 bytes
+# Sector size (logical/physical): 512 bytes / 512 bytes
+# I/O size (minimum/optimal): 512 bytes / 512 bytes
+# Disklabel type: gpt
+
+# Resize LUKS container (quick). Prefer specifying the target size in sectors.
+# Example (from this guide’s earlier conservative target):
+# 398GB = 427737899008 bytes
+# sectors = bytes / 512 = 835,620,896 sectors
 
 # Check current LUKS size
 sudo cryptsetup status fedora_resize
@@ -245,16 +252,30 @@ sudo parted /dev/nvme0n1
 (parted) print
 # Note the current end sector of partition 3: 944388095s
 
+(parted) unit s
 (parted) resizepart 3
 # You'll be prompted: "End?"
-# Calculate new end: start (3328000) + new size in sectors
-# 398GB = 427737899008 bytes ÷ 512 = 835620896 sectors
-# New end: 3328000 + 835620896 = 838948896
+#
+# IMPORTANT:
+# - parted must be in sector mode for sector math to work: (parted) unit s
+# - parted wants an absolute END sector (not "start + length" pasted blindly).
+# - If you forget `unit s`, you may see prompts like `End? [484GB]?` and a plain number
+#   like `838948895` will be interpreted as GB, causing: "outside of the device".
+#
+# With units in sectors (512 bytes/sector), the correct math is:
+#
+# start = 3,328,000
+# target_length_in_sectors = 835,620,896  (example: 398GB / 512)
+# end = start + target_length_in_sectors - 1
+#     = 3,328,000 + 835,620,896 - 1
+#     = 838,948,895
+#
+# So the correct new end is 838948895s (NOT 838948896s).
 
-End? [944388095s]? 838948896s
+End? [944388095s]? 838948895s
 
 (parted) print
-# Verify partition 3 now ends at ~838948896
+# Verify partition 3 now ends at 838948895s
 
 (parted) quit
 ```
@@ -280,8 +301,9 @@ sudo fdisk -l /dev/nvme0n1
 # /dev/nvme0n1p3   3328000  838948896  835620897  398.7G
 # /dev/nvme0n1p4 944388096 1000212479  55824384  26.6G
 
-# Notice the gap between p3 end (838948896) and p4 start (944388096)
-# Gap = 944388096 - 838948896 = 105439200 sectors ≈ 50GB
+# Notice the gap between p3 end (838948895) and p4 start (944388096)
+# First free sector after p3 is (p3_end + 1) = 838948896
+# Gap (sectors) = 944388096 - 838948896 = 105439200 sectors ≈ 50.4GiB
 ```
 
 ### Step 8: Delete and Recreate Ubuntu Partition
@@ -305,12 +327,56 @@ sudo parted /dev/nvme0n1
 (parted) rm 4
 # Partition 4 is now deleted (data still on disk!)
 
-(parted) mkpart primary btrfs 838948897s 1000212479s
-# Creates new partition 4 starting right after p3
-# Uses same end sector as before (for now)
+# Moving p4 "left" by editing the partition table can still keep the btrfs data intact,
+# but alignment may matter. There are two variants:
+#
+# Variant A (simple): start p4 at (p3_end + 1). This can trigger an "optimal alignment"
+# warning in parted on some systems.
+#
+# Variant B (recommended if you want optimal alignment): shrink p3 a tiny bit more to
+# create alignment slack, then start p4 at an optimally-aligned sector.
+
+# --- Variant B: create alignment slack for optimal alignment ---
+
+# 1) Confirm current situation and the tiny slack after p3:
+(parted) unit s
+(parted) print
+(parted) print free
+
+# Example after resizing p3:
+# p3: start=3328000s, end=838948895s
+# free: 838948896s..838949151s (256 sectors)  <- too small to reach an "optimal" boundary if needed
+
+# 2) Shrink p3 a little further to create at least 2048 sectors (1MiB) of free space after p3.
+#    1MiB = 2048 sectors (512 bytes/sector).
+#
+# Choose a new p3 end so that you leave >= 2048 sectors of free space after it.
+# For example, move p3 end left by 4096 sectors (2MiB) to be conservative:
+# new_p3_end = 838948895 - 4096 = 838944799
+(parted) resizepart 3
+End? 838944799s
+
+# 3) Delete p4 (data remains on disk; only the partition entry is removed):
+(parted) rm 4
+
+# 4) Start p4 at the first free sector after the new p3 end:
+# new_p4_start = new_p3_end + 1 = 838944800
+# If parted warns about "not properly aligned for best performance", bump start forward
+# to an optimal boundary and re-check after creation with:
+# (parted) align-check optimal 4
+#
+# Create p4 using the same end as before (for now):
+(parted) mkpart primary btrfs 838944800s 1000212479s
 
 (parted) print
-# Should show new p4: start=838948897, end=1000212479
+(parted) align-check minimal 4
+(parted) align-check optimal 4
+
+(parted) print
+# Should show new p4: start close to the first free sector after p3, end=1000212479
+# If you used Variant B, verify alignment:
+# - `align-check minimal 4` should be aligned
+# - `align-check optimal 4` should be aligned (after creating enough slack and choosing a good start)
 
 (parted) quit
 ```
@@ -332,7 +398,7 @@ cat /proc/partitions | grep nvme0n1
 sudo parted /dev/nvme0n1
 
 (parted) print
-# Current p4: 838948897s to 1000212479s (still small)
+# Current p4: should start right after p3 (or slightly later if you chose an aligned start)
 
 (parted) resizepart 4
 End? [1000212479s]? 100%
