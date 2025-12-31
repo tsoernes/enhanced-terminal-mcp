@@ -144,7 +144,8 @@ AVAILABLE SHELLS:
 {shell_list}
 
 BEHAVIOR:
-- Commands running longer than async_threshold_secs automatically switch to background
+- Commands running longer than async_threshold_secs automatically switch to background (keeps running)
+- No timeout by default - commands run until completion unless timeout_secs is explicitly set
 - Returns job_id for tracking via enhanced_terminal_job_status
 - Security denylist blocks dangerous commands (rm -rf /, shutdown, fork bombs, etc.)
 - PTY support preserves colors and terminal features
@@ -155,7 +156,7 @@ SECURITY:
 - Custom patterns via custom_denylist parameter
 - No privilege escalation without explicit configuration
 - Output size limits prevent memory exhaustion
-- Timeout protection prevents runaway processes
+- Optional timeout protection (timeout_secs) to prevent runaway processes
 
 RETURNS:
 - job_id: Unique identifier for this command execution
