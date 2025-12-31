@@ -7,6 +7,7 @@ A standalone Model Context Protocol (MCP) server that provides terminal executio
 ### Tools
 
 1. **enhanced_terminal** - Execute shell commands with smart async switching
+   - **Streaming Output**: Real-time output notifications in sync mode
    - Automatically switches to background after 50 seconds (configurable)
    - PTY support with proper terminal emulation
    - Configurable working directory, shell, timeout, and output limits
@@ -37,6 +38,7 @@ A standalone Model Context Protocol (MCP) server that provides terminal executio
 
 ### Key Features
 
+- **Streaming Output**: Real-time output notifications as commands execute (sync mode)
 - **Smart Async Switching**: Commands automatically move to background after 50 seconds (configurable)
 - **Security Denylist**: Blocks dangerous commands like `rm -rf /`, `shutdown`, fork bombs, etc.
 - **Job Management**: Track, monitor, and cancel background jobs with rich metadata
