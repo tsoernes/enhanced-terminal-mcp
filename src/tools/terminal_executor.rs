@@ -1,5 +1,10 @@
 use anyhow::Result;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use rmcp::{
+    Peer,
+    model::{LoggingLevel, LoggingMessageNotificationParam},
+    service::RoleServer,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
@@ -81,6 +86,7 @@ pub struct ExecutionResult {
 pub async fn execute_command(
     input: &TerminalExecutionInput,
     job_manager: &JobManager,
+    peer: Option<Peer<RoleServer>>,
 ) -> Result<ExecutionResult> {
     let command = input.command.trim();
 
@@ -100,7 +106,7 @@ pub async fn execute_command(
     if env_bool("ENHANCED_TERMINAL_SUDO_WRAP") && sudo_looks_used(command) {
         let report = ensure_sudo_primed_for_wrap(command, &input.env_vars).await;
         let wrapped = wrap_sudo_command_for_server(command);
-        return execute_command_inner(&wrapped, input, job_manager, report).await;
+        return execute_command_inner(&wrapped, input, job_manager, report, peer).await;
     }
 
     let sudo_prime_report = maybe_start_sudo_keepalive(command, &input.env_vars).await;
@@ -280,6 +286,21 @@ pub async fn execute_command(
                 // Update job with incremental output
                 let output_str = String::from_utf8_lossy(&data).to_string();
                 job_manager.append_output(&job_id, &output_str, output_limit);
+
+                // Send streaming notification if peer is available
+                if let Some(ref peer) = peer {
+                    let _ = peer
+                        .notify_logging_message(LoggingMessageNotificationParam {
+                            level: LoggingLevel::Info,
+                            logger: Some("enhanced_terminal".to_string()),
+                            data: serde_json::json!({
+                                "job_id": &job_id,
+                                "output": &output_str,
+                                "type": "stream"
+                            }),
+                        })
+                        .await;
+                }
             }
             Ok(Some(ReadMsg::Eof)) => {
                 tracing::debug!("Main task: EOF received, job_id={}", job_id);
@@ -490,6 +511,7 @@ async fn execute_command_inner(
     input: &TerminalExecutionInput,
     job_manager: &JobManager,
     sudo_prime_report: Option<SudoPrimeReport>,
+    peer: Option<Peer<RoleServer>>,
 ) -> Result<ExecutionResult> {
     let command = command.trim();
 
@@ -668,6 +690,21 @@ async fn execute_command_inner(
                 // Update job with incremental output
                 let output_str = String::from_utf8_lossy(&data).to_string();
                 job_manager.append_output(&job_id, &output_str, output_limit);
+
+                // Send streaming notification if peer is available
+                if let Some(ref peer) = peer {
+                    let _ = peer
+                        .notify_logging_message(LoggingMessageNotificationParam {
+                            level: LoggingLevel::Info,
+                            logger: Some("enhanced_terminal".to_string()),
+                            data: serde_json::json!({
+                                "job_id": &job_id,
+                                "output": &output_str,
+                                "type": "stream"
+                            }),
+                        })
+                        .await;
+                }
             }
             Ok(Some(ReadMsg::Eof)) => {
                 tracing::debug!("Main task: EOF received, job_id={}", job_id);

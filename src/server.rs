@@ -1,8 +1,9 @@
 use crate::detection::{detect_binaries, detect_shells};
 use crate::tools::{JobManager, TerminalExecutionInput, execute_command};
 use rmcp::{
-    ErrorData as McpError, handler::server::router::tool::ToolRouter,
-    handler::server::wrapper::Parameters, model::*, tool, tool_handler, tool_router,
+    ErrorData as McpError, Peer, handler::server::router::tool::ToolRouter,
+    handler::server::wrapper::Parameters, model::*, service::RoleServer, tool, tool_handler,
+    tool_router,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -172,6 +173,7 @@ RETURNS:
     async fn enhanced_terminal(
         &self,
         Parameters(input): Parameters<TerminalExecutionInput>,
+        peer: Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         // Validate shell against detected shells
         if !self.detected_shells.is_empty() && !self.detected_shells.contains(&input.shell) {
@@ -185,7 +187,7 @@ RETURNS:
             ));
         }
 
-        let result = execute_command(&input, &self.job_manager)
+        let result = execute_command(&input, &self.job_manager, Some(peer))
             .await
             .map_err(|e| {
                 McpError::internal_error(format!("Command execution failed: {}", e), None)
