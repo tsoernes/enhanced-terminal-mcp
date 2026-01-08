@@ -32,9 +32,6 @@ pub struct TerminalExecutionInput {
     /// Timeout in seconds (None/0 = no timeout, default: None)
     #[serde(default)]
     pub timeout_secs: Option<u64>,
-    /// Async threshold in seconds - switch to background after this (default: 50)
-    #[serde(default = "default_async_threshold")]
-    pub async_threshold_secs: u64,
     /// Environment variables to set for the command
     #[serde(default)]
     pub env_vars: std::collections::HashMap<String, String>,
@@ -61,8 +58,11 @@ fn default_output_limit() -> usize {
     16 * 1024
 }
 
-fn default_async_threshold() -> u64 {
-    50
+fn get_async_threshold_secs() -> u64 {
+    std::env::var("ENHANCED_TERMINAL_ASYNC_THRESHOLD_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50)
 }
 
 #[derive(Debug, Serialize)]
@@ -91,9 +91,8 @@ pub async fn execute_command(
     let command = input.command.trim();
 
     tracing::debug!(
-        "execute_command called: command={}, async_threshold_secs={}, force_sync={}",
+        "execute_command called: command={}, force_sync={}",
         command,
-        input.async_threshold_secs,
         input.force_sync
     );
 
@@ -198,7 +197,7 @@ pub async fn execute_command(
 
     let output_limit = input.output_limit;
     let timeout = input.timeout_secs.map(Duration::from_secs);
-    let async_threshold = Duration::from_secs(input.async_threshold_secs);
+    let async_threshold = Duration::from_secs(get_async_threshold_secs());
     let start_time = Instant::now();
 
     let mut output = Vec::new();
@@ -602,7 +601,7 @@ async fn execute_command_inner(
 
     let output_limit = input.output_limit;
     let timeout = input.timeout_secs.map(Duration::from_secs);
-    let async_threshold = Duration::from_secs(input.async_threshold_secs);
+    let async_threshold = Duration::from_secs(get_async_threshold_secs());
     let start_time = Instant::now();
 
     let mut output = Vec::new();
