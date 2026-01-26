@@ -196,7 +196,10 @@ pub async fn execute_command(
         .map_err(|e| anyhow::anyhow!("Failed to clone reader: {}", e))?;
 
     let output_limit = input.output_limit;
-    let timeout = input.timeout_secs.map(Duration::from_secs);
+    let timeout = match input.timeout_secs {
+        Some(0) | None => None,
+        Some(secs) => Some(Duration::from_secs(secs)),
+    };
     let async_threshold = Duration::from_secs(get_async_threshold_secs());
     let start_time = Instant::now();
 
@@ -600,7 +603,10 @@ async fn execute_command_inner(
         .map_err(|e| anyhow::anyhow!("Failed to clone reader: {}", e))?;
 
     let output_limit = input.output_limit;
-    let timeout = input.timeout_secs.map(Duration::from_secs);
+    let timeout = match input.timeout_secs {
+        Some(0) | None => None,
+        Some(secs) => Some(Duration::from_secs(secs)),
+    };
     let async_threshold = Duration::from_secs(get_async_threshold_secs());
     let start_time = Instant::now();
 
