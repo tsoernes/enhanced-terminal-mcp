@@ -43,19 +43,20 @@ tail -f ~/login_logout_times.log
 tail -n 50 ~/login_logout_times.log
 
 # Search for specific events
-grep "SYSTEM BOOT" ~/login_logout_times.log
-grep "SCREEN LOCKED" ~/login_logout_times.log
+grep "startup" ~/login_logout_times.log
+grep "screen lock" ~/login_logout_times.log
+grep "login" ~/login_logout_times.log
 ```
 
 ## Log Format
 
 ```
-[2026-02-05 14:27:57] USER LOGIN - User: torstein.sornes, Display: :0, Session: N/A
-[2026-02-05 14:30:15] SCREEN LOCKED - User: torstein.sornes
-[2026-02-05 14:30:45] SCREEN UNLOCKED - User: torstein.sornes
-[2026-02-05 17:45:23] USER LOGOUT - User: torstein.sornes, Session: 3
-[2026-02-05 08:30:45] SYSTEM BOOT - Host: D2S3Q34
-[2026-02-05 17:45:28] SYSTEM SHUTDOWN - Host: D2S3Q34
+2026-02-05 08:30:45 startup
+2026-02-05 14:27:57 login
+2026-02-05 14:30:15 screen lock
+2026-02-05 14:30:45 screen unlock
+2026-02-05 17:45:23 logout
+2026-02-05 17:45:28 shutdown
 ```
 
 ## Uninstall
