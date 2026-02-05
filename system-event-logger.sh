@@ -14,28 +14,32 @@ touch "$LOG_FILE" 2>/dev/null || {
 # Get current timestamp
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
 
+# Get additional context
+HOSTNAME=$(hostname)
+USER=$(whoami)
+
 # Log the event
 case "$EVENT_TYPE" in
     boot|startup)
-        echo "$TIMESTAMP startup" >> "$LOG_FILE"
+        echo "[$TIMESTAMP] SYSTEM BOOT - Host: $HOSTNAME, User: $USER" >> "$LOG_FILE"
         ;;
     login)
-        echo "$TIMESTAMP login" >> "$LOG_FILE"
+        echo "[$TIMESTAMP] USER LOGIN - User: $USER, Display: ${DISPLAY:-N/A}, Session: ${XDG_SESSION_ID:-N/A}" >> "$LOG_FILE"
         ;;
     logout)
-        echo "$TIMESTAMP logout" >> "$LOG_FILE"
+        echo "[$TIMESTAMP] USER LOGOUT - User: $USER, Session: ${XDG_SESSION_ID:-N/A}" >> "$LOG_FILE"
         ;;
     lock)
-        echo "$TIMESTAMP screen lock" >> "$LOG_FILE"
+        echo "[$TIMESTAMP] SCREEN LOCKED - User: $USER" >> "$LOG_FILE"
         ;;
     unlock)
-        echo "$TIMESTAMP screen unlock" >> "$LOG_FILE"
+        echo "[$TIMESTAMP] SCREEN UNLOCKED - User: $USER" >> "$LOG_FILE"
         ;;
     shutdown)
-        echo "$TIMESTAMP shutdown" >> "$LOG_FILE"
+        echo "[$TIMESTAMP] SYSTEM SHUTDOWN - Host: $HOSTNAME, User: $USER" >> "$LOG_FILE"
         ;;
     *)
-        echo "$TIMESTAMP unknown: $EVENT_TYPE" >> "$LOG_FILE"
+        echo "[$TIMESTAMP] UNKNOWN EVENT: $EVENT_TYPE - User: $USER" >> "$LOG_FILE"
         ;;
 esac
 

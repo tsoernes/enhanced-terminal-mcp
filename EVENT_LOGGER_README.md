@@ -54,19 +54,17 @@ chmod +x install-event-logger.sh
 
 Each log entry follows this format:
 ```
-YYYY-MM-DD HH:MM:SS event_type
+[YYYY-MM-DD HH:MM:SS] EVENT_TYPE - Additional context
 ```
-
-Event types: `startup`, `login`, `screen lock`, `screen unlock`, `logout`, `shutdown`
 
 Example entries:
 ```
-2024-01-15 08:30:45 startup
-2024-01-15 08:31:12 login
-2024-01-15 09:15:30 screen lock
-2024-01-15 09:16:02 screen unlock
-2024-01-15 17:45:23 logout
-2024-01-15 17:45:28 shutdown
+[2024-01-15 08:30:45] SYSTEM BOOT - Host: my-laptop
+[2024-01-15 08:31:12] USER LOGIN - User: username, Display: :0, Session: 3
+[2024-01-15 09:15:30] SCREEN LOCKED - User: username
+[2024-01-15 09:16:02] SCREEN UNLOCKED - User: username
+[2024-01-15 17:45:23] USER LOGOUT - User: username, Session: 3
+[2024-01-15 17:45:28] SYSTEM SHUTDOWN - Host: my-laptop
 ```
 
 ## Viewing Logs
