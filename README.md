@@ -209,11 +209,10 @@ Force synchronous execution (wait for completion):
 }
 ```
 
-With timeout and custom denylist:
+With custom denylist:
 ```json
 {
   "command": "docker run myimage",
-  "timeout_secs": 600,
   "custom_denylist": ["docker rm", "docker system prune"]
 }
 ```
@@ -494,7 +493,7 @@ This server uses a modular structure with Rust 2024 edition:
 - **Smart async switching** - Auto-background after 50s (configurable)
 - **Thread-based job execution** - Efficient background task management
 - **Incremental output capture** - Memory-efficient streaming with read position tracking
-- **No timeout by default** - Set timeout_secs to enable (0 or None = no timeout)
+- **No timeout by default** - Set ENHANCED_TERMINAL_TIMEOUT_SECS environment variable to enable
 
 ## Configuration
 
@@ -502,7 +501,7 @@ This server uses a modular structure with Rust 2024 edition:
 
 - **Shell**: `bash` (was: `sh`)
 - **Async Threshold**: `50` seconds (was: `5`)
-- **Timeout**: `None` (no timeout by default, was: `300`)
+- **Timeout**: `None` (no timeout by default, set via ENHANCED_TERMINAL_TIMEOUT_SECS environment variable)
 - **Output Limit**: `16384` bytes (16KB)
 - **Max Concurrency**: `16` (was: `12`)
 - **Version Timeout**: `1500` ms

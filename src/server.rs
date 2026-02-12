@@ -133,7 +133,6 @@ PARAMETERS:
 - cwd (string, default: '.'): Working directory for command execution
 - shell (string, default: 'bash'): Shell to use from available shells (see below)
 - output_limit (number, default: 16384): Maximum output size in bytes
-- timeout_secs (number, default: None): Timeout in seconds (0 or None = no timeout)
 - env_vars (object, default: {}): Environment variables to set (e.g. {\"PATH\": \"/usr/bin\", \"DEBUG\": \"true\"})
 - force_sync (boolean, default: false): Force synchronous execution regardless of duration
 - custom_denylist (array, default: []): Additional dangerous patterns to block
@@ -145,7 +144,8 @@ AVAILABLE SHELLS:
 BEHAVIOR:
 - Commands running longer than 50 seconds automatically switch to background (keeps running)
   (configurable via ENHANCED_TERMINAL_ASYNC_THRESHOLD_SECS environment variable)
-- No timeout by default - commands run until completion unless timeout_secs is explicitly set
+- No timeout by default - commands run until completion
+  (configurable via ENHANCED_TERMINAL_TIMEOUT_SECS environment variable)
 - Returns job_id for tracking via enhanced_terminal_job_status
 - Security denylist blocks dangerous commands (rm -rf /, shutdown, fork bombs, etc.)
 - PTY support preserves colors and terminal features
@@ -156,7 +156,7 @@ SECURITY:
 - Custom patterns via custom_denylist parameter
 - No privilege escalation without explicit configuration
 - Output size limits prevent memory exhaustion
-- Optional timeout protection (timeout_secs) to prevent runaway processes
+- Optional timeout protection via ENHANCED_TERMINAL_TIMEOUT_SECS environment variable
 
 RETURNS:
 - job_id: Unique identifier for this command execution
@@ -669,7 +669,7 @@ impl rmcp::ServerHandler for EnhancedTerminalServer {
                • Default shell: bash\n\
                • Available shells: {}\n\
                • Smart async: Auto-background after 50s (ENHANCED_TERMINAL_ASYNC_THRESHOLD_SECS env var)\n\
-               • No timeout by default (timeout_secs: 0 or None)\n\
+               • No timeout by default (ENHANCED_TERMINAL_TIMEOUT_SECS env var)\n\
                • Environment variables: Set via env_vars parameter\n\
                • Security: Denylist blocks rm -rf /, shutdown, fork bombs, etc.\n\
                • Output: 16KB limit (configurable), captured incrementally\n\

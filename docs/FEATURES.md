@@ -28,8 +28,7 @@ A production-ready Model Context Protocol (MCP) server providing terminal execut
 ```json
 {
   "command": "npm install",
-  "async_threshold_secs": 5,
-  "timeout_secs": 600
+  "async_threshold_secs": 5
 }
 ```
 Returns immediately with job ID after 5 seconds if still running.
@@ -216,12 +215,15 @@ Shell information embedded in `ServerInfo` instructions visible to LLM.
   "cwd": "string",                  // Default: "."
   "shell": "string",                // Default: "sh"
   "output_limit": number,           // Default: 16384 (16KB)
-  "timeout_secs": number,           // Default: 300 (5 minutes)
   "async_threshold_secs": number,   // Default: 5 seconds
   "force_sync": boolean,            // Default: false
-  "custom_denylist": ["string"]     // Default: []
+  "custom_denylist": ["string"],    // Default: []
+  "env_vars": object,               // Default: {}
+  "tags": ["string"]                // Default: []
 }
 ```
+
+**Note:** Timeout is configured via the `ENHANCED_TERMINAL_TIMEOUT_SECS` environment variable (no timeout by default).
 
 ### Binary Detection
 

@@ -87,8 +87,6 @@ async fn enhanced_terminal_echo() {
                     "command": "echo hello",
                     "cwd": ".",
                     "shell": "bash",
-                    "timeout_secs": 5,
-                    "async_threshold_secs": 50,
                     "force_sync": true
                 }))
                 .expect("tool arguments must be a JSON object")
@@ -144,8 +142,6 @@ async fn sudo_prime_then_cached_sudo_n_opt_in() {
                     "command": format!("SUDO_ASKPASS={} sudo -A -v && sudo -n ls /", askpass),
                     "cwd": ".",
                     "shell": "bash",
-                    "timeout_secs": 30,
-                    "async_threshold_secs": 50,
                     "force_sync": true
                 }))
                 .expect("tool arguments must be a JSON object")
@@ -175,8 +171,6 @@ async fn sudo_prime_then_cached_sudo_n_opt_in() {
                     "command": "sudo -n ls /",
                     "cwd": ".",
                     "shell": "bash",
-                    "timeout_secs": 10,
-                    "async_threshold_secs": 50,
                     "force_sync": true
                 }))
                 .expect("tool arguments must be a JSON object")

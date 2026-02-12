@@ -160,17 +160,13 @@ uv pip install ezdxf
 
 ### Solution 2: Always Set Explicit Timeout
 
-Add `timeout_secs` to prevent indefinite hanging:
+Set the `ENHANCED_TERMINAL_TIMEOUT_SECS` environment variable to prevent indefinite hanging:
 
-```json
-{
-  "command": "...",
-  "cwd": "...",
-  "timeout_secs": 300
-}
+```bash
+export ENHANCED_TERMINAL_TIMEOUT_SECS=300
 ```
 
-This ensures the command will timeout after 5 minutes if something goes wrong.
+This ensures commands will timeout after 5 minutes (300 seconds) if something goes wrong.
 
 ### Solution 3: Force Async Mode for Long Operations
 

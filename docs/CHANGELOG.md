@@ -85,10 +85,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - More predictable behavior for typical CLI operations
   - Still fully configurable via `async_threshold_secs`
 - **Timeout Behavior**: Changed from 300 seconds default to no timeout
-  - `timeout_secs` now defaults to `None` (no timeout)
-  - Set to 0 or omit for no timeout
-  - Specify explicit value for timeout enforcement
+  - Timeout is now configured via `ENHANCED_TERMINAL_TIMEOUT_SECS` environment variable
+  - No timeout by default (was: 300 seconds)
+  - Set environment variable to desired timeout in seconds
   - Prevents unexpected command termination
+  - Removed `timeout_secs` parameter from tool API
 - **Binary Detection Concurrency**: Increased from 12 to 16 parallel checks
   - Faster tool detection across all categories
   - Better utilization of modern multi-core systems

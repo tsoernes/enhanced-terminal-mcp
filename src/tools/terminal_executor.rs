@@ -29,9 +29,6 @@ pub struct TerminalExecutionInput {
     /// Output limit in bytes (default: 16384)
     #[serde(default = "default_output_limit")]
     pub output_limit: usize,
-    /// Timeout in seconds (None/0 = no timeout, default: None)
-    #[serde(default)]
-    pub timeout_secs: Option<u64>,
     /// Environment variables to set for the command
     #[serde(default)]
     pub env_vars: std::collections::HashMap<String, String>,
@@ -63,6 +60,12 @@ fn get_async_threshold_secs() -> u64 {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(50)
+}
+
+fn get_timeout_secs() -> Option<u64> {
+    std::env::var("ENHANCED_TERMINAL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
 }
 
 #[derive(Debug, Serialize)]
@@ -196,10 +199,7 @@ pub async fn execute_command(
         .map_err(|e| anyhow::anyhow!("Failed to clone reader: {}", e))?;
 
     let output_limit = input.output_limit;
-    let timeout = match input.timeout_secs {
-        Some(0) | None => None,
-        Some(secs) => Some(Duration::from_secs(secs)),
-    };
+    let timeout = get_timeout_secs().map(Duration::from_secs);
     let async_threshold = Duration::from_secs(get_async_threshold_secs());
     let start_time = Instant::now();
 
@@ -603,10 +603,7 @@ async fn execute_command_inner(
         .map_err(|e| anyhow::anyhow!("Failed to clone reader: {}", e))?;
 
     let output_limit = input.output_limit;
-    let timeout = match input.timeout_secs {
-        Some(0) | None => None,
-        Some(secs) => Some(Duration::from_secs(secs)),
-    };
+    let timeout = get_timeout_secs().map(Duration::from_secs);
     let async_threshold = Duration::from_secs(get_async_threshold_secs());
     let start_time = Instant::now();
 
