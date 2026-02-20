@@ -17,6 +17,7 @@ use super::denylist::{find_matched_pattern, is_denied};
 use super::job_manager::{JobManager, JobStatus};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TerminalExecutionInput {
     /// Command to execute
     pub command: String,

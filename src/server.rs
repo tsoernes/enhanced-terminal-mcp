@@ -9,6 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DetectBinariesInput {
     /// Optional filter for specific categories
     #[serde(default)]
@@ -33,6 +34,7 @@ fn default_version_timeout() -> u64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct JobStatusInput {
     /// Job ID to query
     pub job_id: String,
@@ -52,6 +54,7 @@ fn default_incremental() -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct JobListInput {
     /// Maximum number of jobs to return (default: 50)
     #[serde(default = "default_max_jobs")]
@@ -79,6 +82,7 @@ fn default_sort_order() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct JobCancelInput {
     /// Job ID to cancel
     pub job_id: String,
