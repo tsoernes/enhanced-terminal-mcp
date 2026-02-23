@@ -183,6 +183,9 @@ pub async fn execute_command(
     apply_default_envs(&mut cmd, &input.env_vars);
 
     // Set environment variables
+    if !input.env_vars.contains_key("TERM") {
+        cmd.env("TERM", "dumb");
+    }
     for (key, value) in &input.env_vars {
         cmd.env(key, value);
     }
@@ -589,6 +592,9 @@ async fn execute_command_inner(
     apply_default_envs(&mut cmd, &input.env_vars);
 
     // Set environment variables
+    if !input.env_vars.contains_key("TERM") {
+        cmd.env("TERM", "dumb");
+    }
     for (key, value) in &input.env_vars {
         cmd.env(key, value);
     }
