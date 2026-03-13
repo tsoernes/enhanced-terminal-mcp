@@ -56,6 +56,18 @@ fn default_output_limit() -> usize {
     16 * 1024
 }
 
+fn apply_default_envs(
+    cmd: &mut CommandBuilder,
+    env_vars: &std::collections::HashMap<String, String>,
+) {
+    if !env_vars.contains_key("TERM") {
+        cmd.env("TERM", "dumb");
+    }
+    if !env_vars.contains_key("NO_COLOR") {
+        cmd.env("NO_COLOR", "1");
+    }
+}
+
 fn get_async_threshold_secs() -> u64 {
     std::env::var("ENHANCED_TERMINAL_ASYNC_THRESHOLD_SECS")
         .ok()
@@ -167,6 +179,8 @@ pub async fn execute_command(
     cmd.arg("-c");
     cmd.arg(command);
     cmd.cwd(&cwd);
+
+    apply_default_envs(&mut cmd, &input.env_vars);
 
     // Set environment variables
     for (key, value) in &input.env_vars {
@@ -571,6 +585,8 @@ async fn execute_command_inner(
     cmd.arg("-c");
     cmd.arg(command);
     cmd.cwd(&cwd);
+
+    apply_default_envs(&mut cmd, &input.env_vars);
 
     // Set environment variables
     for (key, value) in &input.env_vars {
