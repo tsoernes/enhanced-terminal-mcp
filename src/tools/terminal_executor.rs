@@ -7,6 +7,7 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -56,16 +57,26 @@ fn default_output_limit() -> usize {
     16 * 1024
 }
 
-fn apply_default_envs(
-    cmd: &mut CommandBuilder,
-    env_vars: &std::collections::HashMap<String, String>,
-) {
-    if !env_vars.contains_key("TERM") {
-        cmd.env("TERM", "dumb");
-    }
-    if !env_vars.contains_key("NO_COLOR") {
-        cmd.env("NO_COLOR", "1");
-    }
+fn apply_default_env(mut env_vars: HashMap<String, String>) -> HashMap<String, String> {
+    env_vars
+        .entry("TERM".to_string())
+        .or_insert_with(|| "dumb".to_string());
+    env_vars
+        .entry("NO_COLOR".to_string())
+        .or_insert_with(|| "1".to_string());
+    env_vars
+        .entry("CLICOLOR".to_string())
+        .or_insert_with(|| "0".to_string());
+    env_vars
+        .entry("CLICOLOR_FORCE".to_string())
+        .or_insert_with(|| "0".to_string());
+    env_vars
+        .entry("FORCE_COLOR".to_string())
+        .or_insert_with(|| "0".to_string());
+    env_vars
+        .entry("COLORTERM".to_string())
+        .or_insert_with(|| "0".to_string());
+    env_vars
 }
 
 fn get_async_threshold_secs() -> u64 {
@@ -180,13 +191,9 @@ pub async fn execute_command(
     cmd.arg(command);
     cmd.cwd(&cwd);
 
-    apply_default_envs(&mut cmd, &input.env_vars);
-
     // Set environment variables
-    if !input.env_vars.contains_key("TERM") {
-        cmd.env("TERM", "dumb");
-    }
-    for (key, value) in &input.env_vars {
+    let env_vars = apply_default_env(input.env_vars.clone());
+    for (key, value) in env_vars {
         cmd.env(key, value);
     }
 
@@ -589,13 +596,9 @@ async fn execute_command_inner(
     cmd.arg(command);
     cmd.cwd(&cwd);
 
-    apply_default_envs(&mut cmd, &input.env_vars);
-
     // Set environment variables
-    if !input.env_vars.contains_key("TERM") {
-        cmd.env("TERM", "dumb");
-    }
-    for (key, value) in &input.env_vars {
+    let env_vars = apply_default_env(input.env_vars.clone());
+    for (key, value) in env_vars {
         cmd.env(key, value);
     }
 
