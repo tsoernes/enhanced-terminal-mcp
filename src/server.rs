@@ -599,29 +599,37 @@ PARAMETERS:
 - version_timeout_ms (number, default: 1500): Timeout per binary version check in milliseconds
 - include_missing (boolean, default: false): Include binaries not found in PATH
 
-CATEGORIES (120+ tools):
-- package_managers: npm, pip, cargo, dnf, apt, snap, flatpak, brew
+CATEGORIES (190+ tools):
+- package_managers: npm, pip, cargo, dnf, apt, snap, flatpak, brew, pnpm, uv, poetry, pipx
 - rust_tools: cargo, rustc, rustfmt, clippy
-- python_tools: python, pip, pytest, black, ruff, mypy
+- python_tools: python, python3, pip, pytest, black, ruff, mypy, uv, poetry, pipenv, pipx, pyright, pylint, flake8, isort, ipython
 - build_systems: make, cmake, ninja, gradle, maven, mvn
 - c_cpp_tools: gcc, g++, clang, gdb, lldb
 - java_jvm_tools: java, javac, javadoc, jar, jarsigner, jconsole, jdeps, jlink, jshell, kotlin, kotlinc, scala, scalac, groovy, groovyc
 - maven_tools: mvn, mvnw, mvnd
-- node_js_tools: node, deno, bun, npm, yarn
+- node_js_tools: node, deno, bun, npm, yarn, pnpm, tsx, tsc, biome, prettier, eslint
 - go_tools: go, gofmt
-- editors_dev: vim, nvim, emacs, code, zed
-- search_productivity: rg, fd, fzf, jq, bat, tree, exa
+- editors_dev: vim, nvim, emacs, code, zed, hx, nano, micro
+- search_productivity: rg, fd, fzf, jq, bat, tree, exa, sd, zoxide, lsd, dust, btm, broot, choose
 - system_perf: htop, ps, top, df, du
-- containers: docker, podman, kubectl, helm
-- networking: curl, wget, dig, traceroute
-- security: openssl, gpg, ssh-keygen
-- databases: sqlite3, psql, mysql, redis-cli
-- vcs: git, gh
-- cad_utils: ODAFileConverter, dwg2svg, dwg2bmp, dwg2pdf, qcad, librecad, freecad, freecadcmd, openscad, dxf2gcode
+- containers: docker, podman, kubectl, helm, docker-compose, kind, minikube, skopeo, buildah, nerdctl, k9s
+- networking: curl, wget, dig, traceroute, http, nc, nmap, ss, ping, mtr, socat
+- security: openssl, gpg, ssh-keygen, age, sops, vault, pass
+- databases: sqlite3, psql, mysql, redis-cli, mongosh, duckdb, clickhouse-client, redis-server
+- vcs: git, gh, lazygit, tig, gitui, hg, svn
+- cloud_cli: aws, gcloud, az, doctl, fly, vercel, wrangler
+- iac_tools: terraform, tofu, pulumi, ansible, ansible-playbook, vagrant, packer
+- media_tools: ffmpeg, ffprobe, convert, magick, exiftool, yt-dlp, sox
+- ai_ml_tools: ollama, huggingface-cli, nvidia-smi, nvcc, rocm-smi, dvc, mlflow
+- docs_tools: pandoc, sphinx-build, mkdocs, doxygen, asciidoctor, mdbook
+- ruby_tools: ruby, gem, bundle, rake, irb, rails
+- dotnet_tools: dotnet, nuget, msbuild
+- cad_utils: ODAFileConverter, dwg2svg, dwg2SVG, dwg2bmp, dwg2pdf, qcad, librecad, freecad, freecadcmd, openscad, dxf2gcode
 
 PERFORMANCE:
 - 16 concurrent checks by default
-- ~2-3 seconds for all categories
+- ~7-10 seconds for all 25 categories (dominated by 1500ms version-probe timeout for uninstalled tools)
+- ~300-1500ms per individual category
 - Configurable timeout per binary
 - Efficient PATH scanning
 
@@ -736,8 +744,10 @@ impl rmcp::ServerHandler for EnhancedTerminalServer {
             \n\
             BINARY CATEGORIES:\n\
             package_managers, rust_tools, python_tools, build_systems, c_cpp_tools,\n\
-            java_jvm_tools, node_js_tools, go_tools, editors_dev, search_productivity,\n\
-            system_perf, containers, networking, security, databases, vcs, cad_utils\n\
+            java_jvm_tools, maven_tools, node_js_tools, go_tools, editors_dev,\n\
+            search_productivity, system_perf, containers, networking, security,\n\
+            databases, vcs, cloud_cli, iac_tools, media_tools, ai_ml_tools,\n\
+            docs_tools, ruby_tools, dotnet_tools, cad_utils\n\
             \n\
             EXAMPLES:\n\
             \n\

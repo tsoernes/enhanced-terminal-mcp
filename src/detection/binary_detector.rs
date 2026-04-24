@@ -30,6 +30,7 @@ const BASE_CANDIDATE_GROUPS: &[(&str, &[&str])] = &[
         "package_managers",
         &[
             "npm", "pip", "cargo", "dnf", "apt", "snap", "flatpak", "brew",
+            "pnpm", "uv", "poetry", "pipx",
         ],
     ),
     (
@@ -40,6 +41,8 @@ const BASE_CANDIDATE_GROUPS: &[(&str, &[&str])] = &[
         "python_tools",
         &[
             "python", "python3", "pip", "pytest", "black", "ruff", "mypy",
+            "uv", "poetry", "pipenv", "pipx", "pyright", "pylint", "flake8",
+            "isort", "ipython",
         ],
     ),
     (
@@ -50,42 +53,107 @@ const BASE_CANDIDATE_GROUPS: &[(&str, &[&str])] = &[
     (
         "java_jvm_tools",
         &[
-            "java",
-            "javac",
-            "javadoc",
-            "jar",
-            "jarsigner",
-            "jconsole",
-            "jdeps",
-            "jlink",
-            "jshell",
-            "kotlin",
-            "kotlinc",
-            "scala",
-            "scalac",
-            "groovy",
-            "groovyc",
+            "java", "javac", "javadoc", "jar", "jarsigner", "jconsole",
+            "jdeps", "jlink", "jshell", "kotlin", "kotlinc", "scala",
+            "scalac", "groovy", "groovyc",
         ],
     ),
     ("maven_tools", &["mvn", "mvnw", "mvnd"]),
-    ("node_js_tools", &["node", "deno", "bun", "npm", "yarn"]),
+    (
+        "node_js_tools",
+        &[
+            "node", "deno", "bun", "npm", "yarn", "pnpm", "tsx", "tsc",
+            "biome", "prettier", "eslint",
+        ],
+    ),
     ("go_tools", &["go", "gofmt"]),
-    ("editors_dev", &["vim", "nvim", "emacs", "code", "zed"]),
+    (
+        "editors_dev",
+        &["vim", "nvim", "emacs", "code", "zed", "hx", "nano", "micro"],
+    ),
     (
         "search_productivity",
-        &["rg", "fd", "fzf", "jq", "bat", "tree", "exa"],
+        &[
+            "rg", "fd", "fzf", "jq", "bat", "tree", "exa", "sd", "zoxide",
+            "lsd", "dust", "btm", "broot", "choose",
+        ],
     ),
     ("system_perf", &["htop", "ps", "top", "df", "du"]),
-    ("containers", &["docker", "podman", "kubectl", "helm"]),
-    ("networking", &["curl", "wget", "dig", "traceroute"]),
-    ("security", &["openssl", "gpg", "ssh-keygen"]),
-    ("databases", &["sqlite3", "psql", "mysql", "redis-cli"]),
-    ("vcs", &["git", "gh"]),
+    (
+        "containers",
+        &[
+            "docker", "podman", "kubectl", "helm", "docker-compose", "kind",
+            "minikube", "skopeo", "buildah", "nerdctl", "k9s",
+        ],
+    ),
+    (
+        "networking",
+        &[
+            "curl", "wget", "dig", "traceroute", "http", "nc", "nmap", "ss",
+            "ping", "mtr", "socat",
+        ],
+    ),
+    (
+        "security",
+        &["openssl", "gpg", "ssh-keygen", "age", "sops", "vault", "pass"],
+    ),
+    (
+        "databases",
+        &[
+            "sqlite3", "psql", "mysql", "redis-cli", "mongosh", "duckdb",
+            "clickhouse-client", "redis-server",
+        ],
+    ),
+    (
+        "vcs",
+        &["git", "gh", "lazygit", "tig", "gitui", "hg", "svn"],
+    ),
+    (
+        "cloud_cli",
+        &["aws", "gcloud", "az", "doctl", "fly", "vercel", "wrangler"],
+    ),
+    (
+        "iac_tools",
+        &[
+            "terraform", "tofu", "pulumi", "ansible", "ansible-playbook",
+            "vagrant", "packer",
+        ],
+    ),
+    (
+        "media_tools",
+        &[
+            "ffmpeg", "ffprobe", "convert", "magick", "exiftool", "yt-dlp",
+            "sox",
+        ],
+    ),
+    (
+        "ai_ml_tools",
+        &[
+            "ollama", "huggingface-cli", "nvidia-smi", "nvcc", "rocm-smi",
+            "dvc", "mlflow",
+        ],
+    ),
+    (
+        "docs_tools",
+        &[
+            "pandoc", "sphinx-build", "mkdocs", "doxygen", "asciidoctor",
+            "mdbook",
+        ],
+    ),
+    (
+        "ruby_tools",
+        &["ruby", "gem", "bundle", "rake", "irb", "rails"],
+    ),
+    (
+        "dotnet_tools",
+        &["dotnet", "nuget", "msbuild"],
+    ),
     (
         "cad_utils",
         &[
             "ODAFileConverter", // ODA File Converter (DWG/DXF version conversion)
             "dwg2svg",          // QCAD: DWG/DXF to SVG
+            "dwg2SVG",          // LibreCAD: DWG/DXF to SVG
             "dwg2bmp",          // QCAD: DWG/DXF to BMP/PNG
             "dwg2pdf",          // QCAD: DWG/DXF to PDF
             "qcad",             // QCAD CAD application
@@ -355,5 +423,97 @@ fn probe_version(path: &str, args: &[&str], timeout_ms: u64) -> anyhow::Result<S
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             Err(anyhow::anyhow!("version probe worker disconnected"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// Run detect_binaries with all categories and print timing + summary.
+    fn run_and_time(concurrency: usize) -> (std::time::Duration, usize, usize) {
+        let start = Instant::now();
+        let reports = detect_binaries(None, concurrency, 1500, true);
+        let elapsed = start.elapsed();
+        let found = reports.iter().filter(|r| r.found).count();
+        let total = reports.len();
+        (elapsed, found, total)
+    }
+
+    #[test]
+    fn benchmark_detect_all_categories() {
+        println!("\n=== detect_binaries benchmark (all {} categories) ===", BASE_CANDIDATE_GROUPS.len());
+        println!("{:<12} {:>10} {:>8} {:>8}", "concurrency", "time (ms)", "found", "total");
+        println!("{}", "-".repeat(42));
+
+        for &concurrency in &[1, 4, 8, 16, 32] {
+            let (elapsed, found, total) = run_and_time(concurrency);
+            println!(
+                "{:<12} {:>10.0} {:>8} {:>8}",
+                concurrency,
+                elapsed.as_secs_f64() * 1000.0,
+                found,
+                total,
+            );
+        }
+        println!();
+    }
+
+    #[test]
+    fn benchmark_detect_single_category() {
+        let categories_to_bench = [
+            "python_tools",
+            "node_js_tools",
+            "cloud_cli",
+            "containers",
+            "cad_utils",
+            "ai_ml_tools",
+        ];
+
+        println!("\n=== detect_binaries benchmark (per category, concurrency=16) ===");
+        println!("{:<22} {:>10} {:>8} {:>8}", "category", "time (ms)", "found", "total");
+        println!("{}", "-".repeat(52));
+
+        for category in &categories_to_bench {
+            let start = Instant::now();
+            let reports = detect_binaries(
+                Some(vec![category.to_string()]),
+                16,
+                1500,
+                true,
+            );
+            let elapsed = start.elapsed();
+            let found = reports.iter().filter(|r| r.found).count();
+            let total = reports.len();
+            println!(
+                "{:<22} {:>10.0} {:>8} {:>8}",
+                category,
+                elapsed.as_secs_f64() * 1000.0,
+                found,
+                total,
+            );
+        }
+        println!();
+    }
+
+    #[test]
+    fn benchmark_detect_all_default_concurrency() {
+        println!("\n=== detect_binaries full scan (concurrency=16) ===");
+        let (elapsed, found, total) = run_and_time(16);
+        println!("  categories : {}", BASE_CANDIDATE_GROUPS.len());
+        println!("  total      : {}", total);
+        println!("  found      : {}", found);
+        println!("  missing    : {}", total - found);
+        println!("  time       : {:.0} ms", elapsed.as_secs_f64() * 1000.0);
+        println!("  per-binary : {:.1} ms avg", elapsed.as_secs_f64() * 1000.0 / total as f64);
+        println!();
+
+        // Sanity: scan must complete in reasonable time even at concurrency=1
+        assert!(
+            elapsed.as_secs() < 120,
+            "full scan took too long: {:?}",
+            elapsed
+        );
     }
 }
