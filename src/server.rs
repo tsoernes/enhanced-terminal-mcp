@@ -617,6 +617,7 @@ CATEGORIES (120+ tools):
 - security: openssl, gpg, ssh-keygen
 - databases: sqlite3, psql, mysql, redis-cli
 - vcs: git, gh
+- cad_utils: ODAFileConverter, dwg2svg, dwg2bmp, dwg2pdf, qcad, librecad, freecad, freecadcmd, openscad, dxf2gcode
 
 PERFORMANCE:
 - 16 concurrent checks by default
@@ -736,7 +737,7 @@ impl rmcp::ServerHandler for EnhancedTerminalServer {
             BINARY CATEGORIES:\n\
             package_managers, rust_tools, python_tools, build_systems, c_cpp_tools,\n\
             java_jvm_tools, node_js_tools, go_tools, editors_dev, search_productivity,\n\
-            system_perf, containers, networking, security, databases, vcs\n\
+            system_perf, containers, networking, security, databases, vcs, cad_utils\n\
             \n\
             EXAMPLES:\n\
             \n\

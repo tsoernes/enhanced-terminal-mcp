@@ -81,6 +81,21 @@ const BASE_CANDIDATE_GROUPS: &[(&str, &[&str])] = &[
     ("security", &["openssl", "gpg", "ssh-keygen"]),
     ("databases", &["sqlite3", "psql", "mysql", "redis-cli"]),
     ("vcs", &["git", "gh"]),
+    (
+        "cad_utils",
+        &[
+            "ODAFileConverter", // ODA File Converter (DWG/DXF version conversion)
+            "dwg2svg",          // QCAD: DWG/DXF to SVG
+            "dwg2bmp",          // QCAD: DWG/DXF to BMP/PNG
+            "dwg2pdf",          // QCAD: DWG/DXF to PDF
+            "qcad",             // QCAD CAD application
+            "librecad",         // LibreCAD application
+            "freecad",          // FreeCAD application
+            "freecadcmd",       // FreeCAD command-line interface
+            "openscad",         // OpenSCAD parametric CAD
+            "dxf2gcode",        // DXF to G-code converter
+        ],
+    ),
 ];
 
 const COMMON_SHELLS: &[(&str, &str)] = &[
