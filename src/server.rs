@@ -1,5 +1,6 @@
 use crate::detection::{detect_binaries, detect_shells};
 use crate::tools::{JobManager, TerminalExecutionInput, execute_command, preview_output};
+use chrono::{SecondsFormat, Utc};
 use rmcp::{
     ErrorData as McpError, Peer, handler::server::router::tool::ToolRouter,
     handler::server::wrapper::Parameters, model::*, service::RoleServer, tool, tool_handler,
@@ -7,6 +8,7 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::{fs::OpenOptions, io::Write, path::PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -33,6 +35,41 @@ fn default_version_timeout() -> u64 {
     1500
 }
 
+const ENHANCED_TERMINAL_CALL_LOG_FILE: &str = "enhanced_terminal_calls.jsonl";
+
+#[derive(Debug, Serialize)]
+struct EnhancedTerminalCallLogEntry<'a> {
+    datetime: String,
+    tool: &'static str,
+    parameters: &'a TerminalExecutionInput,
+}
+
+fn enhanced_terminal_call_log_path() -> PathBuf {
+    std::env::var_os("ENHANCED_TERMINAL_CALL_LOG_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(ENHANCED_TERMINAL_CALL_LOG_FILE)
+        })
+}
+
+fn log_enhanced_terminal_call(input: &TerminalExecutionInput) -> std::io::Result<()> {
+    let entry = EnhancedTerminalCallLogEntry {
+        datetime: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        tool: "enhanced_terminal",
+        parameters: input,
+    };
+
+    let log_path = enhanced_terminal_call_log_path();
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)?;
+    serde_json::to_writer(&mut file, &entry)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    writeln!(file)?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct JobStatusInput {
@@ -41,16 +78,19 @@ pub struct JobStatusInput {
     /// If true, return only new output since last check (default: true)
     #[serde(default = "default_incremental")]
     pub incremental: bool,
-    /// Offset for pagination (bytes into output, default: 0)
+    /// Offset for pagination in bytes (default: 0)
     #[serde(default)]
-    pub offset: usize,
-    /// Limit for pagination (bytes to return, default: 0 = all)
+    pub offset_bytes: usize,
+    /// Limit for pagination in bytes (default: 0 = all remaining)
     #[serde(default)]
-    pub limit: usize,
+    pub limit_bytes: usize,
     /// Maximum number of GPT-5/o200k_base tokens to return from the selected output chunk.
     /// Defaults to 4096. Set to 0 to disable token truncation.
     #[serde(default = "default_preview_tokens")]
     pub preview_tokens: usize,
+    /// If true, include the full command. Defaults to false to keep repeated polling compact.
+    #[serde(default)]
+    pub full_command: bool,
 }
 
 fn default_incremental() -> bool {
@@ -94,6 +134,15 @@ fn default_sort_order() -> String {
 pub struct JobCancelInput {
     /// Job ID to cancel
     pub job_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct JobStdinInput {
+    /// Job ID whose PTY stdin should receive input
+    pub job_id: String,
+    /// Exact UTF-8 input to write. Include a trailing newline (\n) to submit a line.
+    pub input: String,
 }
 
 #[derive(Clone)]
@@ -142,11 +191,12 @@ impl EnhancedTerminalServer {
 
 PARAMETERS:
 - command (string, required): The shell command to execute
-- cwd (string, default: '.'): Working directory for command execution
+- cwd (string, default: '.'): Working directory for command execution; when omitted, '.' is resolved from the MCP server process working directory set by the caller/client
 - shell (string, default: 'bash'): Shell to use from available shells (see below)
 - preview_tokens (number, default: 4096): Maximum GPT-5/o200k_base tokens to return in the initial output preview; set 0 to disable token truncation
 - env_vars (object, default: {}): Environment variables to set (e.g. {\"PATH\": \"/usr/bin\", \"DEBUG\": \"true\"})
 - force_sync (boolean, default: false): Force synchronous execution regardless of duration
+- force_async (boolean, default: false): Force immediate background execution and return a job_id without waiting for the async threshold
 - custom_denylist (array, default: []): Additional dangerous patterns to block
 - tags (array, default: []): Optional tags for categorizing jobs (e.g., [\"build\", \"ci\"])
 
@@ -156,9 +206,10 @@ AVAILABLE SHELLS:
 BEHAVIOR:
 - Commands running longer than 50 seconds automatically switch to background (keeps running)
   (configurable via ENHANCED_TERMINAL_ASYNC_THRESHOLD_SECS environment variable)
+- Set force_async=true to immediately return a job_id for interactive commands that need stdin
 - No timeout by default - commands run until completion
   (configurable via ENHANCED_TERMINAL_TIMEOUT_SECS environment variable)
-- Returns job_id for tracking via enhanced_terminal_job_status
+- Returns a readable adjective-noun-number job_id for tracking via enhanced_terminal_job_status
 - Security denylist blocks dangerous commands (rm -rf /, shutdown, fork bombs, etc.)
 - PTY support preserves colors and terminal features
 - Incremental output captured during background execution
@@ -167,11 +218,11 @@ SECURITY:
 - 40+ dangerous patterns blocked by default
 - Custom patterns via custom_denylist parameter
 - No privilege escalation without explicit configuration
-- Output size limits prevent memory exhaustion
+- Token previews and bounded preview buffers prevent oversized MCP responses
 - Optional timeout protection via ENHANCED_TERMINAL_TIMEOUT_SECS environment variable
 
 RETURNS:
-- job_id: Unique identifier for this command execution
+- job_id: Unique readable adjective-noun-number identifier for this command execution
 - command: The executed command
 - working_directory: Resolved working directory path
 - exit_code: Exit code (if completed, null if still running)
@@ -188,6 +239,17 @@ RETURNS:
         Parameters(input): Parameters<TerminalExecutionInput>,
         peer: Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
+        log_enhanced_terminal_call(&input).map_err(|e| {
+            McpError::internal_error(format!("Failed to log enhanced_terminal call: {}", e), None)
+        })?;
+
+        if input.force_sync && input.force_async {
+            return Err(McpError::invalid_params(
+                "force_sync and force_async cannot both be true",
+                None,
+            ));
+        }
+
         // Validate shell against detected shells
         if !self.detected_shells.is_empty() && !self.detected_shells.contains(&input.shell) {
             return Err(McpError::invalid_params(
@@ -246,7 +308,10 @@ RETURNS:
                 result_text.push_str(&format!("Duration: {:.2}s\n", duration));
             }
 
-            result_text.push_str(&format!("Exit Code: {:?}\n", result.exit_code));
+            match result.exit_code {
+                Some(exit_code) => result_text.push_str(&format!("Exit Code: {}\n", exit_code)),
+                None => result_text.push_str("Exit Code: null\n"),
+            }
             result_text.push_str(&format!("Success: {}\n", result.success));
 
             if result.timed_out {
@@ -261,7 +326,7 @@ RETURNS:
             result_text.push_str(&result.output);
 
             if result.truncated {
-                result_text.push_str("\n\n[Output truncated due to size limit]");
+                result_text.push_str("\n\n[Output truncated due to preview token limit]");
             }
         }
 
@@ -273,11 +338,12 @@ RETURNS:
         description = "Get status and output of a background job.
 
 PARAMETERS:
-- job_id (string, required): The job identifier returned by enhanced_terminal
+- job_id (string, required): The readable adjective-noun-number job identifier returned by enhanced_terminal
 - incremental (boolean, default: true): If true, return only new output since last check (RECOMMENDED)
-- offset (number, default: 0): Starting byte position for pagination
-- limit (number, default: 0): Maximum bytes to select for pagination (0 = all)
+- offset_bytes (number, default: 0): Starting byte position for pagination
+- limit_bytes (number, default: 0): Maximum bytes to select for pagination (0 = all remaining)
 - preview_tokens (number, default: 4096): Maximum GPT-5/o200k_base tokens to return from the selected output chunk; set 0 to disable token truncation
+- full_command (boolean, default: false): Include the full command; by default job_status returns only the command summary to keep polling compact
 
 BEHAVIOR:
 - Returns current status: Running, Completed, Failed, TimedOut, or Canceled
@@ -297,19 +363,19 @@ When incremental=true (default, recommended):
 - Reset position by calling with incremental=false to get all output again
 
 PAGINATION MODE:
-When offset > 0 or limit > 0:
+When offset_bytes > 0 or limit_bytes > 0:
 - Returns specific byte range of output
-- offset: Starting position in bytes
-- limit: Number of bytes to select before optional token previewing (0 = all remaining)
+- offset_bytes: Starting position in bytes
+- limit_bytes: Number of bytes to select before optional token previewing (0 = all remaining)
 - Returns has_more flag indicating if more data available
 - Returns total_length for overall output size
 - Useful for seeking into very long logs
 - Can re-read specific segments without full retrieval
 
 RETURNS:
-- job_id: Job identifier
-- command: The executed command
-- summary: First 100 characters of command
+- job_id: Readable adjective-noun-number job identifier
+- command: Full executed command, only present when full_command=true
+- summary: Short command summary returned by default
 - shell: Shell used for execution
 - cwd: Working directory
 - status: Current job status (Running, Completed, Failed, TimedOut, Canceled)
@@ -320,31 +386,46 @@ RETURNS:
 - output: Command output (full, incremental, or paginated based on parameters, optionally token-previewed)
 - truncated: Boolean indicating if output preview was truncated
 - (pagination only) has_more: Boolean indicating if more data available
-- (pagination only) total_length: Total output size in bytes"
+- (pagination only) total_length: Total output size in bytes
+- (pagination only) next_offset_bytes: Byte offset to pass to the next call"
     )]
     async fn job_status(
         &self,
         Parameters(input): Parameters<JobStatusInput>,
     ) -> Result<CallToolResult, McpError> {
         // Determine if pagination is requested
-        let use_pagination = input.offset > 0 || input.limit > 0;
+        let use_pagination = input.offset_bytes > 0 || input.limit_bytes > 0;
+
+        let mut range_start_byte = None;
+        let mut range_end_byte = None;
+        let mut requested_end_byte = None;
+        let mut next_offset_bytes = None;
 
         let (mut output_to_show, has_more, total_length) = if use_pagination {
-            // Use pagination
-            let limit = if input.limit == 0 {
+            // Use byte-explicit pagination
+            let limit_bytes = if input.limit_bytes == 0 {
                 usize::MAX
             } else {
-                input.limit
+                input.limit_bytes
             };
 
-            let (output, has_more, total) = self
+            let range = self
                 .job_manager
-                .get_output_range(&input.job_id, input.offset, limit)
+                .get_output_range(&input.job_id, input.offset_bytes, limit_bytes)
                 .ok_or_else(|| {
                     McpError::invalid_params("Job not found", None::<serde_json::Value>)
                 })?;
 
-            (output, Some(has_more), Some(total))
+            range_start_byte = Some(range.start_byte);
+            range_end_byte = Some(range.end_byte);
+            requested_end_byte = Some(range.requested_end_byte);
+            next_offset_bytes = range.next_offset_bytes;
+
+            (
+                range.output,
+                Some(range.has_more),
+                Some(range.total_len_bytes),
+            )
         } else if input.incremental {
             // Get incremental output
             let (new_output, is_running) = self
@@ -377,8 +458,10 @@ RETURNS:
             .ok_or_else(|| McpError::invalid_params("Job not found", None::<serde_json::Value>))?;
 
         let mut result_text = format!("Job ID: {}\n", job.job_id);
-        result_text.push_str(&format!("Command: {}\n", job.command));
         result_text.push_str(&format!("Summary: {}\n", job.summary));
+        if input.full_command {
+            result_text.push_str(&format!("Command: {}\n", job.command));
+        }
         result_text.push_str(&format!("Shell: {}\n", job.shell));
         result_text.push_str(&format!("Working Directory: {}\n", job.cwd));
         result_text.push_str(&format!("Status: {:?}\n", job.status));
@@ -408,19 +491,30 @@ RETURNS:
 
         if use_pagination {
             result_text.push_str(&format!(
-                "Output Mode: Paginated (offset: {}, limit: {})\n",
-                input.offset,
-                if input.limit == 0 {
+                "Output Mode: Paginated (offset_bytes: {}, limit_bytes: {})\n",
+                input.offset_bytes,
+                if input.limit_bytes == 0 {
                     "all".to_string()
                 } else {
-                    input.limit.to_string()
+                    input.limit_bytes.to_string()
                 }
             ));
             if let Some(total) = total_length {
                 result_text.push_str(&format!("Total Output Length: {} bytes\n", total));
             }
+            if let (Some(start), Some(end), Some(requested_end)) =
+                (range_start_byte, range_end_byte, requested_end_byte)
+            {
+                result_text.push_str(&format!(
+                    "Returned Byte Range: {}..{} (requested end: {})\n",
+                    start, end, requested_end
+                ));
+            }
             if let Some(more) = has_more {
                 result_text.push_str(&format!("Has More: {}\n", more));
+            }
+            if let Some(next) = next_offset_bytes {
+                result_text.push_str(&format!("Next Offset Bytes: {}\n", next));
             }
         } else if input.incremental {
             result_text.push_str(&format!(
@@ -449,15 +543,12 @@ RETURNS:
             result_text.push_str("\n\n[Output truncated - showing first part only]");
         }
 
-        if use_pagination {
-            if let (Some(more), Some(_total)) = (has_more, total_length) {
-                if more {
-                    let next_offset = input.offset + output_to_show.len();
-                    result_text.push_str(&format!(
-                        "\n\n[More output available. Next offset: {}]",
-                        next_offset
-                    ));
-                }
+        if use_pagination && has_more == Some(true) {
+            if let Some(next) = next_offset_bytes {
+                result_text.push_str(&format!(
+                    "\n\n[More output available. Next offset_bytes: {}]",
+                    next
+                ));
             }
         }
 
@@ -489,7 +580,7 @@ FILTERING:
 - Filters are combined with AND logic
 
 RETURNS: List of jobs with:
-- job_id: Unique identifier
+- job_id: Unique readable adjective-noun-number identifier
 - command: Full executed command
 - summary: First 100 characters of command
 - status: Current status (Running, Completed, Failed, TimedOut, Canceled)
@@ -586,7 +677,7 @@ RETURNS: List of jobs with:
         description = "Cancel a running background job by sending SIGTERM (Unix only).
 
 PARAMETERS:
-- job_id (string, required): The job identifier to cancel
+- job_id (string, required): The readable adjective-noun-number job identifier to cancel
 
 BEHAVIOR:
 - Sends SIGTERM signal to the process (Unix only)
@@ -619,6 +710,45 @@ RETURNS:
     }
 
     #[tool(
+        name = "enhanced_terminal_job_stdin",
+        description = "Write input to a running background job's PTY stdin.
+
+PARAMETERS:
+- job_id (string, required): The readable adjective-noun-number job identifier returned by enhanced_terminal
+- input (string, required): Exact UTF-8 input to write; include \n to submit a line
+
+BEHAVIOR:
+- Writes to the PTY stdin for a job that is still Running
+- Does not append a newline automatically
+- Useful for answering prompts or interacting with commands after they switch to background
+
+RETURNS:
+- Confirmation with the number of bytes written"
+    )]
+    async fn job_stdin(
+        &self,
+        Parameters(input): Parameters<JobStdinInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let bytes_written = self
+            .job_manager
+            .write_stdin(&input.job_id, &input.input)
+            .map_err(|e| {
+                McpError::invalid_params(
+                    format!("Failed to write to job stdin: {}", e),
+                    None::<serde_json::Value>,
+                )
+            })?;
+
+        let byte_label = if bytes_written == 1 { "byte" } else { "bytes" };
+        let result_text = format!(
+            "Wrote {} {} to stdin for job {}.",
+            bytes_written, byte_label, input.job_id
+        );
+
+        Ok(CallToolResult::success(vec![Content::text(result_text)]))
+    }
+
+    #[tool(
         name = "detect_binaries",
         description = "Detect developer tools and their versions with fast parallel scanning.
 
@@ -644,6 +774,7 @@ CATEGORIES (190+ tools):
 - containers: docker, podman, kubectl, helm, docker-compose, kind, minikube, skopeo, buildah, nerdctl, k9s
 - networking: curl, wget, dig, traceroute, http, nc, nmap, ss, ping, mtr, socat
 - security: openssl, gpg, ssh-keygen, age, sops, vault, pass
+- auth_helpers: zenity, ssh-askpass, sshaskpass, ksshaskpass, pinentry variants
 - databases: sqlite3, psql, mysql, redis-cli, mongosh, duckdb, clickhouse-client, redis-server
 - vcs: git, gh, lazygit, tig, gitui, hg, svn
 - cloud_cli: aws, gcloud, az, doctl, fly, vercel, wrangler
@@ -657,7 +788,7 @@ CATEGORIES (190+ tools):
 
 PERFORMANCE:
 - 16 concurrent checks by default
-- ~7-10 seconds for all 25 categories (dominated by 1500ms version-probe timeout for uninstalled tools)
+- ~7-10 seconds for all 26 categories (dominated by 1500ms version-probe timeout for uninstalled tools)
 - ~300-1500ms per individual category
 - Configurable timeout per binary
 - Efficient PATH scanning
@@ -700,10 +831,11 @@ impl rmcp::ServerHandler for EnhancedTerminalServer {
             \n\
             CORE FEATURES:\n\
             • Smart async switching: Commands auto-background after 50s (configurable)\n\
-            • Job management: Full tracking, status, output streaming, cancellation\n\
+            • Job management: Full tracking, status, output notifications, stdin, cancellation\n\
             • Security: 40+ dangerous patterns blocked by default\n\
-            • Performance: 16 concurrent binary detection\n\
+            • Performance: 16 concurrent binary detection checks\n\
             • Environment: Full env var support, PTY terminal emulation\n\
+            • Audit trail: enhanced_terminal calls are appended to enhanced_terminal_calls.jsonl\n\
             \n\
             TOOLS:\n\
             \n\
@@ -711,11 +843,12 @@ impl rmcp::ServerHandler for EnhancedTerminalServer {
                • Default shell: bash\n\
                • Available shells: {}\n\
                • Smart async: Auto-background after 50s (ENHANCED_TERMINAL_ASYNC_THRESHOLD_SECS env var)\n\
+               • Force async: Set force_async=true to immediately get a job_id for stdin-capable interactive jobs\n\
                • No timeout by default (ENHANCED_TERMINAL_TIMEOUT_SECS env var)\n\
                • Environment variables: Set via env_vars parameter\n\
                • Security: Denylist blocks rm -rf /, shutdown, fork bombs, etc.\n\
-               • Output: 16KB limit (configurable), captured incrementally\n\
-               • Returns: job_id for tracking background execution\n\
+               • Output: token-bounded previews, captured incrementally\n\
+               • Returns: readable adjective-noun-number job_id for tracking background execution\n\
             \n\
             2. enhanced_terminal_job_status - Monitor background jobs\n\
                • Get current status: Running, Completed, Failed, TimedOut, Canceled\n\
@@ -730,26 +863,32 @@ impl rmcp::ServerHandler for EnhancedTerminalServer {
                • Quick overview with output previews\n\
                • Filter by status if needed\n\
             \n\
-            4. job_cancel - Cancel running jobs\n\
+            4. enhanced_terminal_job_cancel - Cancel running jobs\n\
                • Sends SIGTERM (Unix/Linux/macOS only)\n\
                • Graceful process termination\n\
                • Updates job status to Canceled\n\
             \n\
-            5. detect_binaries - Fast tool detection\n\
-               • Scans 100+ developer tools across 16 categories\n\
-               • 16 concurrent checks (~2-3 seconds total)\n\
+            5. enhanced_terminal_job_stdin - Send input to running jobs\n\
+               • Writes exact UTF-8 text to a job's PTY stdin\n\
+               • Include \\n in input to submit a line; no newline is appended automatically\n\
+               • Useful for prompts after a command switches to background\n\
+            \n\
+            6. detect_binaries - Fast tool detection\n\
+               • Scans 190+ developer tools across 26 categories\n\
+               • 16 concurrent checks by default\n\
                • Filter by category for targeted detection\n\
                • Returns: paths, versions, availability\n\
             \n\
             SMART ASYNC:\n\
             Commands exceeding 50 seconds automatically move to background (configurable via\n\
             ENHANCED_TERMINAL_ASYNC_THRESHOLD_SECS environment variable, defaults to 50).\n\
-            Returns immediately with job_id. Use enhanced_terminal_job_status with incremental=true to poll for updates.\n\
-            Set force_sync=true to wait for completion regardless of duration.\n\
+            Returns immediately with a readable adjective-noun-number job_id. Use enhanced_terminal_job_status with incremental=true to poll for updates, and enhanced_terminal_job_stdin to send input to prompts.\n\
+            Set force_sync=true to wait for completion regardless of duration, or force_async=true to return a job_id immediately.\n\
             \n\
             ENVIRONMENT VARIABLES:\n\
             Set environment variables via env_vars parameter:\n\
             {{\"PATH\": \"/custom/path\", \"DEBUG\": \"true\", \"NODE_ENV\": \"production\"}}\n\
+            enhanced_terminal call log path can be overridden with ENHANCED_TERMINAL_CALL_LOG_PATH.\n\
             \n\
             SECURITY DENYLIST:\n\
             Blocks dangerous patterns (40+ default):\n\
@@ -774,9 +913,9 @@ impl rmcp::ServerHandler for EnhancedTerminalServer {
             BINARY CATEGORIES:\n\
             package_managers, rust_tools, python_tools, build_systems, c_cpp_tools,\n\
             java_jvm_tools, maven_tools, node_js_tools, go_tools, editors_dev,\n\
-            search_productivity, system_perf, containers, networking, security,\n\
+            search_productivity, system_perf, containers, networking, security, auth_helpers,\n\
             databases, vcs, cloud_cli, iac_tools, media_tools, ai_ml_tools,\n\
-            docs_tools, ruby_tools, dotnet_tools, cad_utils\n\
+            docs_tools, ruby_tools, dotnet_tools, cad_utils (26 categories total)\n\
             \n\
             EXAMPLES:\n\
             \n\
@@ -787,7 +926,7 @@ impl rmcp::ServerHandler for EnhancedTerminalServer {
             {{\"command\": \"npm install\", \"env_vars\": {{\"NODE_ENV\": \"production\"}}}}\n\
             \n\
             Monitor job:\n\
-            {{\"job_id\": \"job-123\", \"incremental\": true}}\n\
+            {{\"job_id\": \"brave-river-1\", \"incremental\": true}}\n\
             \n\
             Detect Python tools:\n\
             {{\"filter_categories\": [\"python_tools\"], \"max_concurrency\": 16}}\n\

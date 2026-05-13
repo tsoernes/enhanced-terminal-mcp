@@ -1,6 +1,8 @@
 use std::borrow::Cow;
+use std::fs;
+use std::path::Path;
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rmcp::ServiceExt;
 use rmcp::model::CallToolRequestParam;
@@ -13,10 +15,40 @@ async fn spawn_child_stdio_transport() -> (
     impl tokio::io::AsyncRead + Send + Unpin + 'static,
     impl tokio::io::AsyncWrite + Send + Unpin + 'static,
 ) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_enhanced-terminal-mcp"))
+    spawn_child_stdio_transport_with_env(&[]).await
+}
+
+async fn spawn_child_stdio_transport_with_env(
+    env_vars: &[(&str, &str)],
+) -> (
+    impl tokio::io::AsyncRead + Send + Unpin + 'static,
+    impl tokio::io::AsyncWrite + Send + Unpin + 'static,
+) {
+    spawn_child_stdio_transport_with_env_and_cwd(env_vars, None).await
+}
+
+async fn spawn_child_stdio_transport_with_env_and_cwd(
+    env_vars: &[(&str, &str)],
+    cwd: Option<&Path>,
+) -> (
+    impl tokio::io::AsyncRead + Send + Unpin + 'static,
+    impl tokio::io::AsyncWrite + Send + Unpin + 'static,
+) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_enhanced-terminal-mcp"));
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+
+    for (key, value) in env_vars {
+        command.env(key, value);
+    }
+
+    let mut child = command
         .spawn()
         .expect("failed to spawn enhanced-terminal-mcp test server");
 
@@ -32,6 +64,28 @@ async fn spawn_child_stdio_transport() -> (
 
 async fn connect_child_client() -> RunningService<RoleClient, ()> {
     let (r, w) = spawn_child_stdio_transport().await;
+
+    // `()` implements `ClientHandler` in rmcp, so it can act as a no-op client service.
+    // With `transport-async-rw`, (AsyncRead, AsyncWrite) can be used as a client transport.
+    ().serve((r, w))
+        .await
+        .expect("failed to initialize rmcp client over child stdio")
+}
+
+async fn connect_child_client_with_env(
+    env_vars: &[(&str, &str)],
+) -> RunningService<RoleClient, ()> {
+    let (r, w) = spawn_child_stdio_transport_with_env(env_vars).await;
+
+    // `()` implements `ClientHandler` in rmcp, so it can act as a no-op client service.
+    // With `transport-async-rw`, (AsyncRead, AsyncWrite) can be used as a client transport.
+    ().serve((r, w))
+        .await
+        .expect("failed to initialize rmcp client over child stdio")
+}
+
+async fn connect_child_client_with_cwd(cwd: &Path) -> RunningService<RoleClient, ()> {
+    let (r, w) = spawn_child_stdio_transport_with_env_and_cwd(&[], Some(cwd)).await;
 
     // `()` implements `ClientHandler` in rmcp, so it can act as a no-op client service.
     // With `transport-async-rw`, (AsyncRead, AsyncWrite) can be used as a client transport.
@@ -71,7 +125,124 @@ async fn list_tools_smoke() {
     assert!(names.iter().any(|n| n == "enhanced_terminal_job_status"));
     assert!(names.iter().any(|n| n == "enhanced_terminal_job_list"));
     assert!(names.iter().any(|n| n == "enhanced_terminal_job_cancel"));
+    assert!(names.iter().any(|n| n == "enhanced_terminal_job_stdin"));
     assert!(names.iter().any(|n| n == "detect_binaries"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enhanced_terminal_logs_calls_to_jsonl() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after epoch")
+        .as_nanos();
+    let log_path = std::env::temp_dir().join(format!(
+        "enhanced_terminal_calls_{}_{}.jsonl",
+        std::process::id(),
+        unique
+    ));
+    let _ = fs::remove_file(&log_path);
+    let log_path_string = log_path.display().to_string();
+    let client = connect_child_client_with_env(&[(
+        "ENHANCED_TERMINAL_CALL_LOG_PATH",
+        log_path_string.as_str(),
+    )])
+    .await;
+
+    let res = client
+        .peer()
+        .call_tool(CallToolRequestParam {
+            name: Cow::Borrowed("enhanced_terminal"),
+            arguments: Some(
+                serde_json::from_value::<serde_json::Map<String, Value>>(json!({
+                    "command": "printf log-test",
+                    "cwd": ".",
+                    "shell": "bash",
+                    "force_sync": true,
+                    "preview_tokens": 0,
+                    "env_vars": {"LOG_TEST": "1"},
+                    "tags": ["audit-test"]
+                }))
+                .expect("tool arguments must be a JSON object")
+                .into_iter()
+                .collect(),
+            ),
+        })
+        .await
+        .expect("tools/call enhanced_terminal failed");
+
+    let text = text_from_calltool(res);
+    assert!(text.contains("log-test"), "unexpected output: {text}");
+
+    let log_text = fs::read_to_string(&log_path).expect("call log should be written");
+    let log_line = log_text
+        .lines()
+        .last()
+        .expect("call log should not be empty");
+    let entry: Value = serde_json::from_str(log_line).expect("call log line should be JSON");
+
+    assert_eq!(entry["tool"], "enhanced_terminal");
+    assert!(
+        entry["datetime"]
+            .as_str()
+            .is_some_and(|value| value.contains('T')),
+        "missing RFC3339-like datetime: {entry:?}"
+    );
+    assert_eq!(entry["parameters"]["command"], "printf log-test");
+    assert_eq!(entry["parameters"]["shell"], "bash");
+    assert_eq!(entry["parameters"]["force_sync"], true);
+    assert_eq!(entry["parameters"]["env_vars"]["LOG_TEST"], "1");
+    assert_eq!(entry["parameters"]["tags"][0], "audit-test");
+
+    let _ = fs::remove_file(&log_path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn enhanced_terminal_omitted_cwd_uses_server_process_cwd() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after epoch")
+        .as_nanos();
+    let temp_dir = std::env::temp_dir().join(format!(
+        "enhanced_terminal_cwd_{}_{}",
+        std::process::id(),
+        unique
+    ));
+    fs::create_dir_all(&temp_dir).expect("failed to create temp server cwd");
+    let expected_cwd = temp_dir
+        .canonicalize()
+        .expect("failed to canonicalize temp cwd");
+
+    let client = connect_child_client_with_cwd(&expected_cwd).await;
+    let res = client
+        .peer()
+        .call_tool(CallToolRequestParam {
+            name: Cow::Borrowed("enhanced_terminal"),
+            arguments: Some(
+                serde_json::from_value::<serde_json::Map<String, Value>>(json!({
+                    "command": "pwd",
+                    "shell": "bash",
+                    "force_sync": true,
+                    "preview_tokens": 0
+                }))
+                .expect("tool arguments must be a JSON object")
+                .into_iter()
+                .collect(),
+            ),
+        })
+        .await
+        .expect("tools/call enhanced_terminal failed");
+
+    let text = text_from_calltool(res);
+    assert!(
+        text.contains(&format!("Working Directory: {}", expected_cwd.display())),
+        "omitted cwd should use server process cwd; output was: {text}"
+    );
+    assert!(
+        text.contains(expected_cwd.to_string_lossy().as_ref()),
+        "pwd output should include server process cwd; output was: {text}"
+    );
+
+    let _ = fs::remove_dir_all(&temp_dir);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -99,6 +270,114 @@ async fn enhanced_terminal_echo() {
 
     let text = text_from_calltool(res);
     assert!(text.contains("hello"), "unexpected output: {text}");
+    assert!(
+        text.contains("Exit Code: 0"),
+        "exit code should not use Option debug formatting: {text}"
+    );
+    assert!(
+        !text.contains("Exit Code: Some("),
+        "exit code leaked Option debug formatting: {text}"
+    );
+
+    let job_id = text
+        .lines()
+        .find_map(|line| line.strip_prefix("Job ID: "))
+        .expect("missing job id");
+    let parts: Vec<&str> = job_id.split('-').collect();
+    assert!(
+        parts.len() == 3 && parts[2].parse::<u64>().is_ok() && !job_id.starts_with("job-"),
+        "expected readable adjective-noun-number job id, got: {job_id}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn job_stdin_writes_to_running_async_job() {
+    let client = connect_child_client().await;
+
+    let run = client
+        .peer()
+        .call_tool(CallToolRequestParam {
+            name: Cow::Borrowed("enhanced_terminal"),
+            arguments: Some(
+                serde_json::from_value::<serde_json::Map<String, Value>>(json!({
+                    "command": "printf 'waiting for input\n'; IFS= read -r line; printf 'got:%s\n' \"$line\"",
+                    "cwd": ".",
+                    "shell": "bash",
+                    "force_async": true,
+                    "preview_tokens": 0
+                }))
+                .expect("tool arguments must be a JSON object")
+                .into_iter()
+                .collect(),
+            ),
+        })
+        .await
+        .expect("tools/call enhanced_terminal failed");
+
+    let run_text = text_from_calltool(run);
+    assert!(
+        run_text.contains("SWITCHED TO BACKGROUND"),
+        "expected async job: {run_text}"
+    );
+    let job_id = run_text
+        .lines()
+        .find_map(|line| line.strip_prefix("Job ID: "))
+        .expect("missing job id")
+        .to_string();
+
+    let stdin = client
+        .peer()
+        .call_tool(CallToolRequestParam {
+            name: Cow::Borrowed("enhanced_terminal_job_stdin"),
+            arguments: Some(
+                serde_json::from_value::<serde_json::Map<String, Value>>(json!({
+                    "job_id": job_id,
+                    "input": "hello from stdin\n"
+                }))
+                .expect("tool arguments must be a JSON object")
+                .into_iter()
+                .collect(),
+            ),
+        })
+        .await
+        .expect("tools/call enhanced_terminal_job_stdin failed");
+
+    let stdin_text = text_from_calltool(stdin);
+    assert!(
+        stdin_text.contains("Wrote 17 bytes"),
+        "unexpected stdin confirmation: {stdin_text}"
+    );
+
+    let mut last_status = String::new();
+    for _ in 0..50 {
+        let status = client
+            .peer()
+            .call_tool(CallToolRequestParam {
+                name: Cow::Borrowed("enhanced_terminal_job_status"),
+                arguments: Some(
+                    serde_json::from_value::<serde_json::Map<String, Value>>(json!({
+                        "job_id": job_id,
+                        "incremental": false,
+                        "preview_tokens": 0
+                    }))
+                    .expect("tool arguments must be a JSON object")
+                    .into_iter()
+                    .collect(),
+                ),
+            })
+            .await
+            .expect("tools/call enhanced_terminal_job_status failed");
+
+        last_status = text_from_calltool(status);
+        if last_status.contains("got:hello from stdin") && last_status.contains("Status: Completed")
+        {
+            return;
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    panic!("job never consumed stdin; last status: {last_status}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -136,6 +415,166 @@ async fn enhanced_terminal_preview_tokens_truncates_output() {
         text.contains("Output truncated"),
         "missing truncation notice: {text}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn job_status_hides_full_command_by_default() {
+    let client = connect_child_client().await;
+    let long_marker = "unique-long-command-marker-for-full-command-test";
+    let long_prefix = "x".repeat(140);
+    let command = format!("printf ok # {long_prefix} {long_marker}");
+
+    let run = client
+        .peer()
+        .call_tool(CallToolRequestParam {
+            name: Cow::Borrowed("enhanced_terminal"),
+            arguments: Some(
+                serde_json::from_value::<serde_json::Map<String, Value>>(json!({
+                    "command": command,
+                    "cwd": ".",
+                    "shell": "bash",
+                    "force_sync": true,
+                    "preview_tokens": 0
+                }))
+                .expect("tool arguments must be a JSON object")
+                .into_iter()
+                .collect(),
+            ),
+        })
+        .await
+        .expect("tools/call enhanced_terminal failed");
+
+    let run_text = text_from_calltool(run);
+    let job_id = run_text
+        .lines()
+        .find_map(|line| line.strip_prefix("Job ID: "))
+        .expect("missing job id")
+        .to_string();
+
+    let compact = client
+        .peer()
+        .call_tool(CallToolRequestParam {
+            name: Cow::Borrowed("enhanced_terminal_job_status"),
+            arguments: Some(
+                serde_json::from_value::<serde_json::Map<String, Value>>(json!({
+                    "job_id": job_id,
+                    "incremental": false,
+                    "preview_tokens": 0
+                }))
+                .expect("tool arguments must be a JSON object")
+                .into_iter()
+                .collect(),
+            ),
+        })
+        .await
+        .expect("tools/call compact job_status failed");
+    let compact_text = text_from_calltool(compact);
+    assert!(
+        compact_text.contains("Summary:"),
+        "missing summary: {compact_text}"
+    );
+    assert!(
+        !compact_text.contains("Command:"),
+        "full command should be hidden by default: {compact_text}"
+    );
+    assert!(
+        !compact_text.contains(long_marker),
+        "long command marker leaked without full_command=true: {compact_text}"
+    );
+
+    let verbose = client
+        .peer()
+        .call_tool(CallToolRequestParam {
+            name: Cow::Borrowed("enhanced_terminal_job_status"),
+            arguments: Some(
+                serde_json::from_value::<serde_json::Map<String, Value>>(json!({
+                    "job_id": job_id,
+                    "incremental": false,
+                    "preview_tokens": 0,
+                    "full_command": true
+                }))
+                .expect("tool arguments must be a JSON object")
+                .into_iter()
+                .collect(),
+            ),
+        })
+        .await
+        .expect("tools/call verbose job_status failed");
+    let verbose_text = text_from_calltool(verbose);
+    assert!(
+        verbose_text.contains("Command:"),
+        "missing full command: {verbose_text}"
+    );
+    assert!(
+        verbose_text.contains(long_marker),
+        "missing long marker: {verbose_text}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn job_status_uses_byte_explicit_pagination() {
+    let client = connect_child_client().await;
+
+    let run = client
+        .peer()
+        .call_tool(CallToolRequestParam {
+            name: Cow::Borrowed("enhanced_terminal"),
+            arguments: Some(
+                serde_json::from_value::<serde_json::Map<String, Value>>(json!({
+                    "command": "printf 'abcdefghij'",
+                    "cwd": ".",
+                    "shell": "bash",
+                    "force_sync": true,
+                    "preview_tokens": 0
+                }))
+                .expect("tool arguments must be a JSON object")
+                .into_iter()
+                .collect(),
+            ),
+        })
+        .await
+        .expect("tools/call enhanced_terminal failed");
+
+    let run_text = text_from_calltool(run);
+    let job_id = run_text
+        .lines()
+        .find_map(|line| line.strip_prefix("Job ID: "))
+        .expect("missing job id")
+        .to_string();
+
+    let status = client
+        .peer()
+        .call_tool(CallToolRequestParam {
+            name: Cow::Borrowed("enhanced_terminal_job_status"),
+            arguments: Some(
+                serde_json::from_value::<serde_json::Map<String, Value>>(json!({
+                    "job_id": job_id,
+                    "offset_bytes": 0,
+                    "limit_bytes": 4,
+                    "preview_tokens": 0
+                }))
+                .expect("tool arguments must be a JSON object")
+                .into_iter()
+                .collect(),
+            ),
+        })
+        .await
+        .expect("tools/call enhanced_terminal_job_status failed");
+
+    let text = text_from_calltool(status);
+    assert!(
+        text.contains("Output Mode: Paginated (offset_bytes: 0, limit_bytes: 4)"),
+        "missing byte-explicit mode: {text}"
+    );
+    assert!(
+        text.contains("Returned Byte Range: 0..4 (requested end: 4)"),
+        "missing byte range metadata: {text}"
+    );
+    assert!(
+        text.contains("Next Offset Bytes: 4"),
+        "missing next byte offset: {text}"
+    );
+    assert!(text.contains("Output:\nabcd"), "unexpected output: {text}");
 }
 
 /// This test is opt-in because it may pop a GUI askpass prompt and requires a working desktop session.

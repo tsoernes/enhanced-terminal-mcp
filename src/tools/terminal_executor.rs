@@ -23,7 +23,8 @@ use super::job_manager::{JobManager, JobStatus};
 pub struct TerminalExecutionInput {
     /// Command to execute
     pub command: String,
-    /// Working directory (default: ".")
+    /// Working directory (default: "."). When omitted, "." is resolved from the
+    /// MCP server process working directory supplied by the caller/client.
     #[serde(default = "default_cwd")]
     pub cwd: String,
     /// Shell to use (default: "sh")
@@ -39,6 +40,9 @@ pub struct TerminalExecutionInput {
     /// Force synchronous execution (wait for completion)
     #[serde(default)]
     pub force_sync: bool,
+    /// Force immediate background execution and return a job_id without waiting for the async threshold.
+    #[serde(default)]
+    pub force_async: bool,
     /// Custom denylist patterns (in addition to defaults)
     #[serde(default)]
     pub custom_denylist: Vec<String>,
@@ -197,9 +201,10 @@ pub async fn execute_command(
     let command = input.command.trim();
 
     tracing::debug!(
-        "execute_command called: command={}, force_sync={}",
+        "execute_command called: command={}, force_sync={}, force_async={}",
         command,
-        input.force_sync
+        input.force_sync,
+        input.force_async
     );
 
     // Optional: server-side sudo wrapping (opt-in).
@@ -296,11 +301,16 @@ pub async fn execute_command(
         input.tags.clone(),
     );
 
-    // Read output with smart async switching
+    // Read output with smart async switching and keep a writer for future stdin calls.
     let mut reader = pair
         .master
         .try_clone_reader()
         .map_err(|e| anyhow::anyhow!("Failed to clone reader: {}", e))?;
+    let stdin_writer = pair
+        .master
+        .take_writer()
+        .map_err(|e| anyhow::anyhow!("Failed to open PTY stdin writer: {}", e))?;
+    job_manager.attach_stdin_writer(&job_id, stdin_writer);
 
     let preview_byte_limit = preview_buffer_limit(input);
     let timeout = get_timeout_secs().map(Duration::from_secs);
@@ -358,12 +368,16 @@ pub async fn execute_command(
         let elapsed = start_time.elapsed();
 
         // Check if we should switch to async (independent of I/O)
-        if !input.force_sync && elapsed > async_threshold {
-            tracing::debug!(
-                "Main task: async threshold reached at {:.2}s, job_id={}",
-                elapsed.as_secs_f64(),
-                job_id
-            );
+        if input.force_async || (!input.force_sync && elapsed > async_threshold) {
+            if input.force_async {
+                tracing::debug!("Main task: force_async requested, job_id={}", job_id);
+            } else {
+                tracing::debug!(
+                    "Main task: async threshold reached at {:.2}s, job_id={}",
+                    elapsed.as_secs_f64(),
+                    job_id
+                );
+            }
             switched_to_async = true;
             break;
         }
@@ -705,11 +719,16 @@ async fn execute_command_inner(
         input.tags.clone(),
     );
 
-    // Read output with smart async switching
+    // Read output with smart async switching and keep a writer for future stdin calls.
     let mut reader = pair
         .master
         .try_clone_reader()
         .map_err(|e| anyhow::anyhow!("Failed to clone reader: {}", e))?;
+    let stdin_writer = pair
+        .master
+        .take_writer()
+        .map_err(|e| anyhow::anyhow!("Failed to open PTY stdin writer: {}", e))?;
+    job_manager.attach_stdin_writer(&job_id, stdin_writer);
 
     let preview_byte_limit = preview_buffer_limit(input);
     let timeout = get_timeout_secs().map(Duration::from_secs);
@@ -767,12 +786,16 @@ async fn execute_command_inner(
         let elapsed = start_time.elapsed();
 
         // Check if we should switch to async (independent of I/O)
-        if !input.force_sync && elapsed > async_threshold {
-            tracing::debug!(
-                "Main task: async threshold reached at {:.2}s, job_id={}",
-                elapsed.as_secs_f64(),
-                job_id
-            );
+        if input.force_async || (!input.force_sync && elapsed > async_threshold) {
+            if input.force_async {
+                tracing::debug!("Main task: force_async requested, job_id={}", job_id);
+            } else {
+                tracing::debug!(
+                    "Main task: async threshold reached at {:.2}s, job_id={}",
+                    elapsed.as_secs_f64(),
+                    job_id
+                );
+            }
             switched_to_async = true;
             break;
         }

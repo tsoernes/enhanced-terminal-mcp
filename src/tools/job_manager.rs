@@ -1,8 +1,9 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Job status for background command execution
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -58,9 +59,12 @@ impl JobRecord {
 }
 
 /// Global job registry
+type PtyWriter = Arc<Mutex<Box<dyn Write + Send>>>;
+
 pub struct JobManager {
     jobs: Arc<Mutex<HashMap<String, JobRecord>>>,
     job_counter: Arc<Mutex<u64>>,
+    stdin_writers: Arc<Mutex<HashMap<String, PtyWriter>>>,
 }
 
 fn floor_char_boundary(text: &str, mut index: usize) -> usize {
@@ -71,20 +75,96 @@ fn floor_char_boundary(text: &str, mut index: usize) -> usize {
     index
 }
 
+#[derive(Debug, Clone)]
+pub struct OutputRange {
+    pub output: String,
+    pub has_more: bool,
+    pub total_len_bytes: usize,
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub requested_end_byte: usize,
+    pub next_offset_bytes: Option<usize>,
+}
+
+const JOB_ID_ADJECTIVES: &[&str] = &[
+    "amber", "ancient", "autumn", "bold", "brave", "bright", "calm", "clever", "cosmic", "crimson",
+    "curious", "daring", "dusky", "eager", "frosty", "gentle", "golden", "hidden", "honest",
+    "jolly", "kind", "lively", "lucky", "lunar", "merry", "misty", "nimble", "noble", "proud",
+    "quiet", "rapid", "restless", "royal", "silent", "silver", "solar", "steady", "swift", "tidy",
+    "vivid", "warm", "wild", "wise", "zesty",
+];
+
+const JOB_ID_NOUNS: &[&str] = &[
+    "badger", "beacon", "bison", "brook", "cedar", "comet", "copper", "dawn", "dolphin", "ember",
+    "falcon", "fern", "forest", "glacier", "harbor", "heron", "island", "jaguar", "lantern",
+    "meadow", "meteor", "nebula", "otter", "panda", "pioneer", "quartz", "raven", "river",
+    "saffron", "sparrow", "summit", "thunder", "tiger", "violet", "voyager", "willow", "zephyr",
+];
+
+fn readable_job_id(sequence: u64) -> String {
+    let seed = mix_job_id_seed(sequence);
+    let adjective = JOB_ID_ADJECTIVES[seed as usize % JOB_ID_ADJECTIVES.len()];
+    let noun = JOB_ID_NOUNS[(seed as usize / JOB_ID_ADJECTIVES.len()) % JOB_ID_NOUNS.len()];
+    format!("{adjective}-{noun}-{sequence}")
+}
+
+fn mix_job_id_seed(sequence: u64) -> u64 {
+    let time_seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or_default();
+    mix64(sequence ^ time_seed.rotate_left(17))
+}
+
+fn mix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e3779b97f4a7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d049bb133111eb);
+    value ^ (value >> 31)
+}
+
+#[cfg(test)]
+fn is_readable_job_id(id: &str) -> bool {
+    let mut parts = id.split('-');
+    let Some(adjective) = parts.next() else {
+        return false;
+    };
+    let Some(noun) = parts.next() else {
+        return false;
+    };
+
+    let Some(number) = parts.next() else {
+        return false;
+    };
+
+    JOB_ID_ADJECTIVES.contains(&adjective)
+        && JOB_ID_NOUNS.contains(&noun)
+        && number.parse::<u64>().is_ok_and(|value| value > 0)
+        && parts.next().is_none()
+}
+
 impl JobManager {
     pub fn new() -> Self {
         Self {
             jobs: Arc::new(Mutex::new(HashMap::new())),
             job_counter: Arc::new(Mutex::new(1)),
+            stdin_writers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Generate a new unique job ID
+    /// Generate a new unique, readable job ID (adjective-noun-number).
     pub fn new_job_id(&self) -> String {
         let mut counter = self.job_counter.lock().unwrap();
-        let id = *counter;
-        *counter += 1;
-        format!("job-{}", id)
+        let jobs = self.jobs.lock().unwrap();
+
+        loop {
+            let sequence = *counter;
+            *counter += 1;
+            let candidate = readable_job_id(sequence);
+            if !jobs.contains_key(&candidate) {
+                return candidate;
+            }
+        }
     }
 
     /// Register a new job
@@ -158,8 +238,43 @@ impl JobManager {
         }
     }
 
+    /// Attach a PTY stdin writer to a running job.
+    pub fn attach_stdin_writer(&self, job_id: &str, writer: Box<dyn Write + Send>) {
+        let mut writers = self.stdin_writers.lock().unwrap();
+        writers.insert(job_id.to_string(), Arc::new(Mutex::new(writer)));
+    }
+
+    /// Write bytes to a running job's PTY stdin.
+    pub fn write_stdin(&self, job_id: &str, input: &str) -> Result<usize> {
+        {
+            let jobs = self.jobs.lock().unwrap();
+            let job = jobs
+                .get(job_id)
+                .ok_or_else(|| anyhow::anyhow!("Job not found"))?;
+            if !matches!(job.status, JobStatus::Running) {
+                return Err(anyhow::anyhow!("Job is not running"));
+            }
+        }
+
+        let writer = {
+            let writers = self.stdin_writers.lock().unwrap();
+            writers
+                .get(job_id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Job stdin is not available"))?
+        };
+
+        let bytes = input.as_bytes();
+        let mut writer = writer.lock().unwrap();
+        writer.write_all(bytes)?;
+        writer.flush()?;
+        Ok(bytes.len())
+    }
+
     /// Complete a job
     pub fn complete_job(&self, job_id: &str, exit_code: Option<i32>, status: JobStatus) {
+        self.stdin_writers.lock().unwrap().remove(job_id);
+
         let mut jobs = self.jobs.lock().unwrap();
         if let Some(job) = jobs.get_mut(job_id) {
             job.finished_at = Some(SystemTime::now());
@@ -262,29 +377,44 @@ impl JobManager {
         }
     }
 
-    /// Get output with pagination (offset and limit)
+    /// Get output with byte-explicit pagination.
     pub fn get_output_range(
         &self,
         job_id: &str,
-        offset: usize,
-        limit: usize,
-    ) -> Option<(String, bool, usize)> {
+        offset_bytes: usize,
+        limit_bytes: usize,
+    ) -> Option<OutputRange> {
         let jobs = self.jobs.lock().unwrap();
-        if let Some(job) = jobs.get(job_id) {
-            let total_len = job.full_output.len();
-            let requested_end = offset.saturating_add(limit).min(total_len);
-            let start = floor_char_boundary(&job.full_output, offset);
-            let end = floor_char_boundary(&job.full_output, requested_end);
-            let output_slice = if start < total_len && start <= end {
-                job.full_output[start..end].to_string()
-            } else {
-                String::new()
-            };
-            let has_more = requested_end < total_len;
-            Some((output_slice, has_more, total_len))
+        let job = jobs.get(job_id)?;
+
+        let total_len_bytes = job.full_output.len();
+        let requested_end_byte = if limit_bytes == usize::MAX {
+            total_len_bytes
         } else {
-            None
-        }
+            offset_bytes
+                .saturating_add(limit_bytes)
+                .min(total_len_bytes)
+        };
+
+        let start_byte = floor_char_boundary(&job.full_output, offset_bytes);
+        let end_byte = floor_char_boundary(&job.full_output, requested_end_byte);
+        let output = if start_byte < total_len_bytes && start_byte <= end_byte {
+            job.full_output[start_byte..end_byte].to_string()
+        } else {
+            String::new()
+        };
+        let has_more = requested_end_byte < total_len_bytes;
+        let next_offset_bytes = has_more.then_some(requested_end_byte);
+
+        Some(OutputRange {
+            output,
+            has_more,
+            total_len_bytes,
+            start_byte,
+            end_byte,
+            requested_end_byte,
+            next_offset_bytes,
+        })
     }
 
     /// Cancel a running job (Unix only)
@@ -293,32 +423,57 @@ impl JobManager {
         use nix::sys::signal::{Signal, kill};
         use nix::unistd::Pid;
 
-        let mut jobs = self.jobs.lock().unwrap();
-        if let Some(job) = jobs.get_mut(job_id) {
-            if matches!(job.status, JobStatus::Running) {
-                if let Some(pid) = job.pid {
-                    let pid = Pid::from_raw(pid as i32);
-                    kill(pid, Signal::SIGTERM)?;
+        let canceled = {
+            let mut jobs = self.jobs.lock().unwrap();
+            if let Some(job) = jobs.get_mut(job_id) {
+                if matches!(job.status, JobStatus::Running) {
+                    if let Some(pid) = job.pid {
+                        let pid = Pid::from_raw(pid as i32);
+                        kill(pid, Signal::SIGTERM)?;
+                    }
+
                     job.status = JobStatus::Canceled;
                     job.finished_at = Some(SystemTime::now());
-                    return Ok(());
+                    true
+                } else {
+                    false
                 }
+            } else {
+                false
             }
+        };
+
+        if canceled {
+            self.stdin_writers.lock().unwrap().remove(job_id);
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Job not found or not running"))
         }
-        Err(anyhow::anyhow!("Job not found or not running"))
     }
 
     #[cfg(not(unix))]
     pub fn cancel_job(&self, job_id: &str) -> Result<()> {
-        let mut jobs = self.jobs.lock().unwrap();
-        if let Some(job) = jobs.get_mut(job_id) {
-            if matches!(job.status, JobStatus::Running) {
-                job.status = JobStatus::Canceled;
-                job.finished_at = Some(SystemTime::now());
-                return Ok(());
+        let canceled = {
+            let mut jobs = self.jobs.lock().unwrap();
+            if let Some(job) = jobs.get_mut(job_id) {
+                if matches!(job.status, JobStatus::Running) {
+                    job.status = JobStatus::Canceled;
+                    job.finished_at = Some(SystemTime::now());
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
             }
+        };
+
+        if canceled {
+            self.stdin_writers.lock().unwrap().remove(job_id);
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Job not found or not running"))
         }
-        Err(anyhow::anyhow!("Job not found or not running"))
     }
 
     /// Delete a job from history
@@ -348,6 +503,42 @@ impl Clone for JobManager {
         Self {
             jobs: Arc::clone(&self.jobs),
             job_counter: Arc::clone(&self.job_counter),
+            stdin_writers: Arc::clone(&self.stdin_writers),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn readable_job_ids_are_human_friendly() {
+        let manager = JobManager::new();
+        let id = manager.new_job_id();
+
+        assert!(is_readable_job_id(&id), "unexpected job id: {id}");
+        assert!(
+            !id.starts_with("job-"),
+            "job id should not use old numeric format: {id}"
+        );
+    }
+
+    #[test]
+    fn readable_job_ids_are_unique_in_registry() {
+        let manager = JobManager::new();
+        let mut ids = std::collections::HashSet::new();
+
+        for _ in 0..128 {
+            let id = manager.new_job_id();
+            assert!(ids.insert(id.clone()), "duplicate id generated: {id}");
+            manager.register_job(
+                id,
+                "true".to_string(),
+                "bash".to_string(),
+                "/tmp".to_string(),
+                None,
+            );
         }
     }
 }

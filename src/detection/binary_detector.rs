@@ -29,8 +29,8 @@ const BASE_CANDIDATE_GROUPS: &[(&str, &[&str])] = &[
     (
         "package_managers",
         &[
-            "npm", "pip", "cargo", "dnf", "apt", "snap", "flatpak", "brew",
-            "pnpm", "uv", "poetry", "pipx",
+            "npm", "pip", "cargo", "dnf", "apt", "snap", "flatpak", "brew", "pnpm", "uv", "poetry",
+            "pipx",
         ],
     ),
     (
@@ -40,9 +40,8 @@ const BASE_CANDIDATE_GROUPS: &[(&str, &[&str])] = &[
     (
         "python_tools",
         &[
-            "python", "python3", "pip", "pytest", "black", "ruff", "mypy",
-            "uv", "poetry", "pipenv", "pipx", "pyright", "pylint", "flake8",
-            "isort", "ipython",
+            "python", "python3", "pip", "pytest", "black", "ruff", "mypy", "uv", "poetry",
+            "pipenv", "pipx", "pyright", "pylint", "flake8", "isort", "ipython",
         ],
     ),
     (
@@ -53,17 +52,29 @@ const BASE_CANDIDATE_GROUPS: &[(&str, &[&str])] = &[
     (
         "java_jvm_tools",
         &[
-            "java", "javac", "javadoc", "jar", "jarsigner", "jconsole",
-            "jdeps", "jlink", "jshell", "kotlin", "kotlinc", "scala",
-            "scalac", "groovy", "groovyc",
+            "java",
+            "javac",
+            "javadoc",
+            "jar",
+            "jarsigner",
+            "jconsole",
+            "jdeps",
+            "jlink",
+            "jshell",
+            "kotlin",
+            "kotlinc",
+            "scala",
+            "scalac",
+            "groovy",
+            "groovyc",
         ],
     ),
     ("maven_tools", &["mvn", "mvnw", "mvnd"]),
     (
         "node_js_tools",
         &[
-            "node", "deno", "bun", "npm", "yarn", "pnpm", "tsx", "tsc",
-            "biome", "prettier", "eslint",
+            "node", "deno", "bun", "npm", "yarn", "pnpm", "tsx", "tsc", "biome", "prettier",
+            "eslint",
         ],
     ),
     ("go_tools", &["go", "gofmt"]),
@@ -74,34 +85,84 @@ const BASE_CANDIDATE_GROUPS: &[(&str, &[&str])] = &[
     (
         "search_productivity",
         &[
-            "rg", "fd", "fzf", "jq", "bat", "tree", "exa", "sd", "zoxide",
-            "lsd", "dust", "btm", "broot", "choose",
+            "rg", "fd", "fzf", "jq", "bat", "tree", "exa", "sd", "zoxide", "lsd", "dust", "btm",
+            "broot", "choose",
         ],
     ),
     ("system_perf", &["htop", "ps", "top", "df", "du"]),
     (
         "containers",
         &[
-            "docker", "podman", "kubectl", "helm", "docker-compose", "kind",
-            "minikube", "skopeo", "buildah", "nerdctl", "k9s",
+            "docker",
+            "podman",
+            "kubectl",
+            "helm",
+            "docker-compose",
+            "kind",
+            "minikube",
+            "skopeo",
+            "buildah",
+            "nerdctl",
+            "k9s",
         ],
     ),
     (
         "networking",
         &[
-            "curl", "wget", "dig", "traceroute", "http", "nc", "nmap", "ss",
-            "ping", "mtr", "socat",
+            "curl",
+            "wget",
+            "dig",
+            "traceroute",
+            "http",
+            "nc",
+            "nmap",
+            "ss",
+            "ping",
+            "mtr",
+            "socat",
         ],
     ),
     (
         "security",
-        &["openssl", "gpg", "ssh-keygen", "age", "sops", "vault", "pass"],
+        &[
+            "openssl",
+            "gpg",
+            "ssh-keygen",
+            "age",
+            "sops",
+            "vault",
+            "pass",
+        ],
+    ),
+    (
+        "auth_helpers",
+        &[
+            "zenity",               // Common GUI dialog helper used by askpass scripts
+            "ssh-askpass",          // Generic OpenSSH askpass helper
+            "sshaskpass",           // Alternate OpenSSH askpass binary name
+            "ksshaskpass",          // KDE askpass helper
+            "lxqt-openssh-askpass", // LXQt askpass helper
+            "gnome-ssh-askpass",    // GNOME/libgnome-keyring askpass helper
+            "x11-ssh-askpass",      // X11 askpass helper
+            "pinentry",             // GnuPG pinentry wrapper
+            "pinentry-gnome3",      // GNOME pinentry
+            "pinentry-gtk-2",       // GTK pinentry
+            "pinentry-qt",          // Qt/KDE pinentry
+            "pinentry-curses",      // Terminal pinentry fallback
+            "pinentry-tty",         // TTY pinentry fallback
+        ],
     ),
     (
         "databases",
         &[
-            "sqlite3", "psql", "mysql", "redis-cli", "mongosh", "duckdb",
-            "clickhouse-client", "redis-server",
+            "sqlite3",
+            "psql",
+            "mysql",
+            "redis-cli",
+            "mongosh",
+            "duckdb",
+            "clickhouse-client",
+            "redis-server",
         ],
     ),
     (
@@ -115,28 +176,41 @@ const BASE_CANDIDATE_GROUPS: &[(&str, &[&str])] = &[
     (
         "iac_tools",
         &[
-            "terraform", "tofu", "pulumi", "ansible", "ansible-playbook",
-            "vagrant", "packer",
+            "terraform",
+            "tofu",
+            "pulumi",
+            "ansible",
+            "ansible-playbook",
+            "vagrant",
+            "packer",
         ],
     ),
     (
         "media_tools",
         &[
-            "ffmpeg", "ffprobe", "convert", "magick", "exiftool", "yt-dlp",
-            "sox",
+            "ffmpeg", "ffprobe", "convert", "magick", "exiftool", "yt-dlp", "sox",
         ],
     ),
     (
         "ai_ml_tools",
         &[
-            "ollama", "huggingface-cli", "nvidia-smi", "nvcc", "rocm-smi",
-            "dvc", "mlflow",
+            "ollama",
+            "huggingface-cli",
+            "nvidia-smi",
+            "nvcc",
+            "rocm-smi",
+            "dvc",
+            "mlflow",
         ],
     ),
     (
         "docs_tools",
         &[
-            "pandoc", "sphinx-build", "mkdocs", "doxygen", "asciidoctor",
+            "pandoc",
+            "sphinx-build",
+            "mkdocs",
+            "doxygen",
+            "asciidoctor",
             "mdbook",
         ],
     ),
@@ -144,10 +218,7 @@ const BASE_CANDIDATE_GROUPS: &[(&str, &[&str])] = &[
         "ruby_tools",
         &["ruby", "gem", "bundle", "rake", "irb", "rails"],
     ),
-    (
-        "dotnet_tools",
-        &["dotnet", "nuget", "msbuild"],
-    ),
+    ("dotnet_tools", &["dotnet", "nuget", "msbuild"]),
     (
         "cad_utils",
         &[
@@ -443,8 +514,14 @@ mod tests {
 
     #[test]
     fn benchmark_detect_all_categories() {
-        println!("\n=== detect_binaries benchmark (all {} categories) ===", BASE_CANDIDATE_GROUPS.len());
-        println!("{:<12} {:>10} {:>8} {:>8}", "concurrency", "time (ms)", "found", "total");
+        println!(
+            "\n=== detect_binaries benchmark (all {} categories) ===",
+            BASE_CANDIDATE_GROUPS.len()
+        );
+        println!(
+            "{:<12} {:>10} {:>8} {:>8}",
+            "concurrency", "time (ms)", "found", "total"
+        );
         println!("{}", "-".repeat(42));
 
         for &concurrency in &[1, 4, 8, 16, 32] {
@@ -467,22 +544,21 @@ mod tests {
             "node_js_tools",
             "cloud_cli",
             "containers",
+            "auth_helpers",
             "cad_utils",
             "ai_ml_tools",
         ];
 
         println!("\n=== detect_binaries benchmark (per category, concurrency=16) ===");
-        println!("{:<22} {:>10} {:>8} {:>8}", "category", "time (ms)", "found", "total");
+        println!(
+            "{:<22} {:>10} {:>8} {:>8}",
+            "category", "time (ms)", "found", "total"
+        );
         println!("{}", "-".repeat(52));
 
         for category in &categories_to_bench {
             let start = Instant::now();
-            let reports = detect_binaries(
-                Some(vec![category.to_string()]),
-                16,
-                1500,
-                true,
-            );
+            let reports = detect_binaries(Some(vec![category.to_string()]), 16, 1500, true);
             let elapsed = start.elapsed();
             let found = reports.iter().filter(|r| r.found).count();
             let total = reports.len();
@@ -506,7 +582,10 @@ mod tests {
         println!("  found      : {}", found);
         println!("  missing    : {}", total - found);
         println!("  time       : {:.0} ms", elapsed.as_secs_f64() * 1000.0);
-        println!("  per-binary : {:.1} ms avg", elapsed.as_secs_f64() * 1000.0 / total as f64);
+        println!(
+            "  per-binary : {:.1} ms avg",
+            elapsed.as_secs_f64() * 1000.0 / total as f64
+        );
         println!();
 
         // Sanity: scan must complete in reasonable time even at concurrency=1

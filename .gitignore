@@ -13,3 +13,6 @@ Cargo.lock
 
 # Debug files
 *.pdb
+
+# Runtime audit logs
+enhanced_terminal_calls.jsonl

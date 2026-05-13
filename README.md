@@ -10,7 +10,7 @@ A standalone Model Context Protocol (MCP) server that provides terminal executio
    - **Streaming Output**: Real-time output notifications in sync mode
    - Automatically switches to background after 50 seconds (configurable)
    - PTY support with proper terminal emulation
-   - Configurable working directory, shell, timeout, and output limits
+   - Configurable working directory, shell, timeout, and token preview limits
    - Security denylist blocks dangerous commands
    - Returns job ID for tracking background tasks
 
@@ -28,8 +28,13 @@ A standalone Model Context Protocol (MCP) server that provides terminal executio
    - Send SIGTERM to running processes
    - Graceful termination of long-running commands
 
-5. **detect_binaries** - Detect developer tools with 16 concurrent checks
-   - Scans PATH for 100+ common development tools
+5. **enhanced_terminal_job_stdin** - Send input to running background jobs
+   - Write exact UTF-8 text to a job's PTY stdin
+   - Include `\n` in `input` to submit a line
+   - Useful for prompts after commands switch to background
+
+6. **detect_binaries** - Detect developer tools with 16 concurrent checks
+   - Scans PATH for 190+ common development tools across 26 categories
    - Fast parallel version detection
    - Supports filtering by category (rust_tools, python_tools, etc.)
    - Categories include: package managers, build systems, programming language tools, editors, containers, and more
@@ -38,13 +43,14 @@ A standalone Model Context Protocol (MCP) server that provides terminal executio
 
 ### Key Features
 
-- **Streaming Output**: Real-time output notifications as commands execute (sync mode)
+- **Streaming Notifications**: Emits MCP logging notifications as command output arrives (client support varies)
 - **Smart Async Switching**: Commands automatically move to background after 50 seconds (configurable)
 - **Security Denylist**: Blocks dangerous commands like `rm -rf /`, `shutdown`, fork bombs, etc.
-- **Job Management**: Track, monitor, and cancel background jobs with rich metadata
+- **Job Management**: Track, monitor, feed stdin to, and cancel background jobs with rich metadata
 - **Job Filtering**: Filter jobs by status, tags, or working directory
 - **Output Pagination**: Seek into specific byte ranges of very long logs
 - **Job Tags**: Categorize jobs with custom tags for easy filtering
+- **Call Logging**: Appends every `enhanced_terminal` shell execution request to `enhanced_terminal_calls.jsonl`
 - **16 Concurrent Checks**: Fast parallel binary detection
 - **PTY Support**: Full terminal emulation for interactive commands
 
@@ -52,14 +58,18 @@ A standalone Model Context Protocol (MCP) server that provides terminal executio
 
 ### Prerequisites
 
-- Rust 1.70 or later
+- Rust with 2024 edition support (Rust 1.85+ recommended)
 - Cargo
 
 ### Build from Source
 
 ```bash
 git clone <repository-url>
-# enhanced-terminal-mcp
+cd enhanced-terminal-mcp
+cargo build --release
+```
+
+The binary will be located at `target/release/enhanced-terminal-mcp`.
 
 ## Sudo Workflow (Recommended)
 
@@ -137,10 +147,6 @@ RUST_LOG=debug enhanced-terminal-mcp
 ```
 
 Look for log lines about `sudo -A -v` (priming) and `sudo -n` (wrapping).
-cargo build --release
-```
-
-The binary will be located at `target/release/enhanced-terminal-mcp`.
 
 ## Usage
 
@@ -167,11 +173,21 @@ Add to your MCP client configuration (e.g., Claude Desktop, Zed):
 }
 ```
 
+### Call Logging
+
+Every `enhanced_terminal` tool call is appended as one JSON object per line to `enhanced_terminal_calls.jsonl` in the repository root. Each entry includes an RFC3339 UTC `datetime`, the tool name, and the full submitted parameters.
+
+Override the log path with `ENHANCED_TERMINAL_CALL_LOG_PATH` if needed.
+
+### Working Directory Defaults
+
+If `cwd` is omitted, it defaults to `.`. That `.` is resolved relative to the MCP server process working directory supplied by the caller/client. In practice, when Codex starts this MCP server from a project, omitted `cwd` uses that project/server launch directory. Pass `cwd` explicitly when you need a specific repository or subdirectory.
+
 ### Tool Examples
 
 #### enhanced_terminal
 
-Basic synchronous execution (completes quickly):
+Basic synchronous execution (completes quickly). `cwd` is optional; omitting it uses the MCP server process working directory supplied by the caller/client:
 ```json
 {
   "command": "ls -la",
@@ -180,13 +196,20 @@ Basic synchronous execution (completes quickly):
 }
 ```
 
-Long-running command (auto-switches to background after 50 seconds):
+Long-running command (auto-switches to background after 50 seconds by default):
 ```json
 {
   "command": "npm install",
   "cwd": "./my-project",
-  "shell": "bash",
-  "async_threshold_secs": 50
+  "shell": "bash"
+}
+```
+
+Force immediate async execution (useful for interactive commands that need stdin):
+```json
+{
+  "command": "read -p 'stdin> ' value; echo received=$value",
+  "force_async": true
 }
 ```
 
@@ -235,20 +258,23 @@ Token-bounded preview (GPT-5/o200k_base tokenizer):
 
 `preview_tokens` defaults to 4096. Set it to 0 to disable token truncation for the bounded in-memory preview buffer.
 
+Job IDs are readable adjective-noun-number handles such as `brave-river-1`, making them easier to copy and discuss than numeric IDs.
+
 #### enhanced_terminal_job_status
 
-Get full output:
+Get full output. `job_status` returns the command summary by default; pass `full_command: true` only when you need the full command text:
 ```json
 {
-  "job_id": "job-123",
-  "incremental": false
+  "job_id": "brave-river-1",
+  "incremental": false,
+  "full_command": true
 }
 ```
 
 Get incremental output (only new since last check):
 ```json
 {
-  "job_id": "job-123",
+  "job_id": "brave-river-1",
   "incremental": true
 }
 ```
@@ -256,18 +282,18 @@ Get incremental output (only new since last check):
 Get paginated output (first 1000 bytes):
 ```json
 {
-  "job_id": "job-123",
-  "offset": 0,
-  "limit": 1000
+  "job_id": "brave-river-1",
+  "offset_bytes": 0,
+  "limit_bytes": 1000
 }
 ```
 
 Get paginated output (next 1000 bytes):
 ```json
 {
-  "job_id": "job-123",
-  "offset": 1000,
-  "limit": 1000
+  "job_id": "brave-river-1",
+  "offset_bytes": 1000,
+  "limit_bytes": 1000
 }
 ```
 
@@ -318,7 +344,18 @@ Combined filters with sort order:
 
 ```json
 {
-  "job_id": "job-123"
+  "job_id": "brave-river-1"
+}
+```
+
+#### enhanced_terminal_job_stdin
+
+Write input to a running async job. Newlines are not appended automatically, so include `\n` when you want to submit a line:
+
+```json
+{
+  "job_id": "brave-river-1",
+  "input": "yes\n"
 }
 ```
 
@@ -333,28 +370,36 @@ Combined filters with sort order:
 }
 ```
 
-
-
 ## Binary Categories
 
 The `detect_binaries` tool supports filtering by these categories:
 
-- `package_managers` - npm, pip, cargo, dnf, apt, etc.
-- `rust_tools` - cargo, rustc, rustfmt, clippy
-- `python_tools` - python, pip, pytest, black, ruff
-- `build_systems` - make, cmake, ninja
-- `c_cpp_tools` - gcc, g++, clang, gdb
-- `java_jvm_tools` - java, javac
-- `node_js_tools` - node, deno, bun
+- `package_managers` - npm, pip, cargo, dnf, apt, snap, flatpak, brew, pnpm, uv, poetry, pipx
+- `rust_tools` - cargo, rustc, rustfmt, clippy-driver
+- `python_tools` - python, python3, pip, pytest, black, ruff, mypy, uv, poetry, pipenv, pipx, pyright, pylint, flake8, isort, ipython
+- `build_systems` - make, cmake, ninja, gradle, maven, mvn
+- `c_cpp_tools` - gcc, g++, clang, gdb, lldb
+- `java_jvm_tools` - java, javac, javadoc, jar, jarsigner, jconsole, jdeps, jlink, jshell, kotlin, kotlinc, scala, scalac, groovy, groovyc
+- `maven_tools` - mvn, mvnw, mvnd
+- `node_js_tools` - node, deno, bun, npm, yarn, pnpm, tsx, tsc, biome, prettier, eslint
 - `go_tools` - go, gofmt
-- `editors_dev` - vim, nvim, emacs, code
-- `search_productivity` - rg, fd, fzf, jq, bat, tree
+- `editors_dev` - vim, nvim, emacs, code, zed, hx, nano, micro
+- `search_productivity` - rg, fd, fzf, jq, bat, tree, exa, sd, zoxide, lsd, dust, btm, broot, choose
 - `system_perf` - htop, ps, top, df, du
-- `containers` - docker, podman, kubectl
-- `networking` - curl, wget, dig
-- `security` - openssl, gpg, ssh-keygen
-- `databases` - sqlite3, psql, mysql
-- `vcs` - git, gh
+- `containers` - docker, podman, kubectl, helm, docker-compose, kind, minikube, skopeo, buildah, nerdctl, k9s
+- `networking` - curl, wget, dig, traceroute, http, nc, nmap, ss, ping, mtr, socat
+- `security` - openssl, gpg, ssh-keygen, age, sops, vault, pass
+- `auth_helpers` - zenity, ssh-askpass, sshaskpass, ksshaskpass, lxqt-openssh-askpass, gnome-ssh-askpass, x11-ssh-askpass, pinentry variants
+- `databases` - sqlite3, psql, mysql, redis-cli, mongosh, duckdb, clickhouse-client, redis-server
+- `vcs` - git, gh, lazygit, tig, gitui, hg, svn
+- `cloud_cli` - aws, gcloud, az, doctl, fly, vercel, wrangler
+- `iac_tools` - terraform, tofu, pulumi, ansible, ansible-playbook, vagrant, packer
+- `media_tools` - ffmpeg, ffprobe, convert, magick, exiftool, yt-dlp, sox
+- `ai_ml_tools` - ollama, huggingface-cli, nvidia-smi, nvcc, rocm-smi, dvc, mlflow
+- `docs_tools` - pandoc, sphinx-build, mkdocs, doxygen, asciidoctor, mdbook
+- `ruby_tools` - ruby, gem, bundle, rake, irb, rails
+- `dotnet_tools` - dotnet, nuget, msbuild
+- `cad_utils` - ODAFileConverter, dwg2svg, dwg2SVG, dwg2bmp, dwg2pdf, qcad, librecad, freecad, freecadcmd, openscad, dxf2gcode
 
 ## Development
 
@@ -373,7 +418,7 @@ cargo test
 ### Running Tests for Denylist
 
 ```bash
-cargo test --lib denylist
+cargo test denylist
 ```
 
 ### Running Locally
@@ -425,12 +470,12 @@ You can add custom patterns via the `custom_denylist` parameter:
 
 ### Async Threshold
 
-Commands that exceed `async_threshold_secs` (default: 50 seconds) automatically switch to background execution. This prevents:
+Commands that exceed the server async threshold (default: 50 seconds, configurable with `ENHANCED_TERMINAL_ASYNC_THRESHOLD_SECS`) automatically switch to background execution. This prevents:
 - Long-running commands from blocking the MCP server
 - Timeout issues with package installations
 - Slow build processes hanging the interface
 
-Set `force_sync: true` to disable this behavior for specific commands.
+Set `force_sync: true` to disable this behavior for specific commands. Set `force_async: true` to return a job ID immediately without waiting for the threshold, which is the recommended flow before using `enhanced_terminal_job_stdin`.
 
 ### Incremental Output
 
@@ -442,22 +487,26 @@ Use `enhanced_terminal_job_status` with `incremental: true` for efficient pollin
 
 This enables streaming-like behavior without actual streaming infrastructure.
 
+### Interactive Job Input
+
+Use `enhanced_terminal_job_stdin` to write to a running job's PTY stdin after it has switched to background. For commands that wait for input, start them with `force_async: true` so the first call returns a job ID immediately. The stdin tool writes exactly the provided `input` string and does not append a newline automatically.
+
 ### Output Pagination
 
 For very long outputs, use pagination mode in `enhanced_terminal_job_status`:
-- Set `offset` to starting byte position
-- Set `limit` to number of bytes to return (0 = all remaining)
+- Set `offset_bytes` to starting byte position
+- Set `limit_bytes` to number of bytes to select (0 = all remaining)
 - Returns `has_more` flag and `total_length`
 - Allows seeking into specific segments without retrieving full output
 
 Example workflow:
 ```json
 // Get first 1000 bytes
-{"job_id": "job-123", "offset": 0, "limit": 1000}
+{"job_id": "brave-river-1", "offset_bytes": 0, "limit_bytes": 1000}
 // Get next 1000 bytes
-{"job_id": "job-123", "offset": 1000, "limit": 1000}
+{"job_id": "brave-river-1", "offset_bytes": 1000, "limit_bytes": 1000}
 // Get all remaining
-{"job_id": "job-123", "offset": 2000, "limit": 0}
+{"job_id": "brave-river-1", "offset_bytes": 2000, "limit_bytes": 0}
 ```
 
 ### Job Tags and Filtering
@@ -496,25 +545,31 @@ This server uses a modular structure with Rust 2024 edition:
 - **schemars** 1.0 - JSON Schema generation for tool inputs
 - **anyhow** 1.x - Error handling
 - **nix** 0.29 - Unix signal handling (Unix only)
+- **tiktoken-rs** 0.11 - GPT-5/o200k_base-compatible token counting for previews
+- **chrono** 0.4 - UTC timestamps for call logging
+- **tracing/tracing-subscriber** 0.1/0.3 - structured server logging
 
 ### Performance
 
 - **16 concurrent binary checks** - Fast parallel tool detection (configurable)
 - **Smart async switching** - Auto-background after 50s (configurable)
-- **Thread-based job execution** - Efficient background task management
-- **Incremental output capture** - Memory-efficient streaming with read position tracking
+- **Tokio background monitoring** - Jobs continue running after smart async switching
+- **Incremental output capture** - Poll new output with read position tracking; byte pagination is available for long logs
 - **No timeout by default** - Set ENHANCED_TERMINAL_TIMEOUT_SECS environment variable to enable
 
 ## Configuration
 
 ### Default Values
 
-- **Shell**: `bash` (was: `sh`)
-- **Async Threshold**: `50` seconds (was: `5`)
-- **Timeout**: `None` (no timeout by default, set via ENHANCED_TERMINAL_TIMEOUT_SECS environment variable)
-- **Output Limit**: `16384` bytes (16KB)
-- **Max Concurrency**: `16` (was: `12`)
-- **Version Timeout**: `1500` ms
+- **Shell**: `bash`
+- **Working Directory**: `.` resolved from the MCP server process working directory supplied by the caller/client
+- **Preview Tokens**: `4096` GPT-5/o200k_base tokens (`0` disables token truncation)
+- **Async Threshold**: `50` seconds (`ENHANCED_TERMINAL_ASYNC_THRESHOLD_SECS`)
+- **Timeout**: `None` by default (`ENHANCED_TERMINAL_TIMEOUT_SECS` enables a timeout)
+- **Job IDs**: readable `adjective-noun-number` handles
+- **Call Log**: `enhanced_terminal_calls.jsonl` in the repo root (`ENHANCED_TERMINAL_CALL_LOG_PATH` overrides)
+- **Max Binary Detection Concurrency**: `16`
+- **Version Probe Timeout**: `1500` ms
 
 ## License
 
