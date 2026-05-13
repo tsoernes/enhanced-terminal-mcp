@@ -1,121 +1,121 @@
-# Repository Summary
+# enhanced-terminal-mcp Code and Architecture Summary
 
 ## Executive Overview
 
-This repository is organized around a detection-focused codebase, with source modules under src and accompanying documentation under docs. The structure separates core detection functionality from supporting tools, promoting maintainability and clear boundaries between algorithmic logic and operational utilities.
+## Purpose
+This repository implements an **Enhanced Terminal MCP Server** in Rust. It exposes terminal-oriented MCP tools that let clients execute shell commands, run long-lived jobs in the background, inspect and paginate job output, interact with PTY-backed processes, and receive real-time streaming notifications while commands are running.
 
-- Architecture: src contains two primary modules—detection for core detection logic and tools for auxiliary utilities and workflows—while docs provides project documentation. This modular layout supports extensibility and testability by keeping responsibilities isolated.
-- Major subsystems: 
-  - Detection: core algorithms and pipeline components for detection tasks.
-  - Tools: utilities and scripts that aid data handling, evaluation, and operational workflows.
-  - Documentation: guidance for usage, design, and operations.
-- Key patterns: separation of concerns via directory boundaries, modular organization for pluggable or extendable detectors, and a conventional src-based layout that simplifies dependency management and collaboration.
+## Architecture
+The system is organized around a small async server core and a few focused subsystems:
+- **`src/server.rs`** defines the MCP server, tool schemas, request validation, and routing.
+- **`src/tools`** contains the execution engine, in-memory job registry, and command denylist enforcement.
+- **`src/detection`** performs startup-time discovery of shells and developer tooling available on the host.
+- **`src/main.rs`** wires the server to MCP stdio transport and initializes runtime/logging.
+
+## Major subsystems
+1. **Terminal execution**: validates requests, resolves working directories, chooses shell behavior, optionally allocates a PTY, and runs commands either synchronously or as background jobs.
+2. **Job management**: tracks lifecycle state, metadata, preview/full output, and PTY stdin handles for interactive sessions using human-readable job IDs.
+3. **Streaming output**: pushes incremental execution output as MCP notifications so clients can render live command progress instead of waiting for completion.
+4. **Security controls**: applies a dangerous-command denylist before process spawn to block clearly risky operations.
+5. **Environment detection**: discovers installed binaries and shell capabilities so the server can advertise and use host-specific execution context.
+
+## Key patterns
+- **Async Tokio-based design** for nonblocking process management and MCP request handling.
+- **Shared state via a central `JobManager`** owned by the server and reused across tool calls.
+- **Barrel modules (`mod.rs`)** to keep public imports compact and decouple the server layer from implementation details.
+- **Environment-driven configuration** for runtime behavior such as logging and server-wide timeout settings.
+- **Operationally focused documentation**: a substantial portion of the repo documents timeout behavior, streaming design, performance tradeoffs, and API evolution, indicating active attention to client interoperability and production diagnostics.
+
+## Repository character
+This is a relatively compact service codebase with most complexity concentrated in process execution semantics, job/output retention, and MCP client compatibility rather than broad application layers. The tests and docs emphasize end-to-end behavior, timeout edge cases, and transport-level integration, which suggests the project is optimized for reliability when embedded in editor or agent workflows.
 
 ## Directory & File Hierarchy for key files
 
 ## .
 
-Repository root that organizes the project into source and documentation directories. Acts as the top-level entry point for the project's structure and collaboration.
-
-**Files:**
-
-- `.gitignore` : Git ignore patterns
-- `Cargo.toml` : Rust project manifest with dependencies (rmcp, tokio, portable-pty, tracing)
-- `LICENSE` : Project license
-- `README.md` : Project documentation
-- `test_mcp.sh` : MCP server test script
+Repository root containing the crate manifest, top-level project guide, basic shell smoke/verification scripts, and licensing/config files. It presents the project as a Rust MCP server centered on PTY-backed terminal execution, job management, environment detection, and timeout/transport correctness.
 
 ### docs
 
-Holds project documentation, such as usage guides, design notes, and operational instructions. Intended to guide users and developers in understanding and working with the detection components and tools.
+Project documentation for features, release history, and operational design decisions. The files are heavily focused on streaming output, timeout behavior, job-list performance, and related refactors, making this directory the main source of architectural rationale and troubleshooting guidance.
 
 **Files:**
 
-- `docs/BUGFIX_TOOL_NAMING.md` : Bug fix documentation for tool naming issues
-- `docs/CHANGELOG.md` : Project changelog
-- `docs/DEBUGGING_TIMEOUT_ISSUE.md` : Documentation on debugging timeout issues
-- `docs/FEATURES.md` : Feature documentation
-- `docs/FEATURES_IMPLEMENTATION.md` : Implementation details for features
-- `docs/FINAL_SUMMARY.md` : Final project summary
-- `docs/IMPLEMENTATION_COMPLETE.md` : Implementation completion notes
-- `docs/IMPLEMENTATION_SUMMARY.md` : Summary of implementation
-- `docs/LIVE_TEST_RESULTS.md` : Live testing results
-- `docs/MIGRATION_GUIDE.md` : Migration guide
-- `docs/PROJECT_COMPLETE.md` : Project completion documentation
-- `docs/SUMMARY.md` : General summary
-- `docs/TIMEOUT_INVESTIGATION.md` : Guide for investigating timeout issues
-- `docs/manual_test.md` : Manual testing documentation
-- `docs/test_new_features.md` : New feature testing guide
+- `docs/CHANGELOG.md` (rel=4): Release history capturing major architectural and API changes, especially the async timeout fix, namespaced tool renames, streaming output support, richer job metadata, and pagination/incremental output additions. It ties specific user-visible behaviors back to implementation choices such as Tokio-based execution and MCP notifications, making it useful for understanding evolution and compatibility expectations.
+- `docs/COMMAND_TIMEOUT_DIAGNOSIS.md` (rel=4): This diagnostic document analyzes why an `enhanced_terminal` invocation timed out in Zed while inspecting a DXF file with Python and `ezdxf`. It traces the interaction between Zed’s hard 60-second MCP client timeout, the terminal tool’s async background-switch threshold, missing-dependency hypotheses, heredoc behavior, and the possibility of large-file parsing delays or async-switch race conditions. The document provides concrete verification commands to test environment state, DXF size, load time, and async job behavior, then recommends mitigations such as lowering the async threshold, setting a global timeout environment variable, breaking work into smaller steps, or using Python-specific MCP tooling. It serves as an operational troubleshooting guide for timeout behavior at the boundary between client expectations and server-side command execution.
+- `docs/FEATURES.md` (rel=3): High-level feature catalog covering async execution, job management, denylist security, binary detection, shell detection, PTY support, output handling, configuration, performance, and platform/security considerations. It serves as architecture-oriented product documentation, though some defaults appear older than the README and code, so it is best used as supplementary context rather than the source of truth.
+- `docs/JOB_LIST_TIMEOUT_ANALYSIS.md` (rel=4): This analysis explains why `enhanced_terminal_job_list` times out when many jobs have large outputs, identifying the core problem as cloning full `JobRecord` values, including unbounded `full_output`, for every job during listing. It quantifies the memory and serialization overhead, contrasts this path with other tools that only touch one job at a time, and evaluates several remediation strategies such as lightweight summary structs, `Arc<String>`, separate output storage, or lazy serialization. The recommended fix is to introduce a summary type that copies only metadata and a short preview, improving both performance and separation of concerns. This document is important because it captures a concrete architectural bottleneck in the job management layer and a clear path to resolving it.
+- `docs/STREAMING_IMPLEMENTATION_SUMMARY.md` (rel=5): This document summarizes the implementation of real-time output streaming for the `enhanced_terminal` tool, focusing on changes in `src/server.rs` and `src/tools/terminal_executor.rs`. It explains the key architectural addition of passing an MCP `Peer<RoleServer>` into command execution so PTY output can be forwarded incrementally as `LoggingMessageNotification` events while also being persisted in the job manager. The writeup details the PTY reader thread, channel-based handoff, notification payload format, and design choices such as optional peer handling, best-effort delivery, and UTF-8 lossy decoding. It also covers expected behavior in sync and async execution modes, testing guidance, performance considerations, and future enhancements, making it the main architectural reference for streaming output support.
+- `docs/STREAMING_OUTPUT.md` (rel=4): Detailed design and usage guide for real-time streaming notifications from synchronous terminal executions. It explains the architecture, MCP notification payloads, client integration patterns, performance tradeoffs, and operational limitations, linking the feature to the server's PTY-reading and notification flow.
+- `docs/TIMEOUT_REFACTOR_SUMMARY.md` (rel=4): This refactoring summary documents the removal of the per-request `timeout_secs` API parameter in favor of a server-wide `ENHANCED_TERMINAL_TIMEOUT_SECS` environment variable. It enumerates the affected code and docs, including updates to terminal execution logic, tool descriptions, tests, and user-facing examples, and explains the motivation of simplifying the API and aligning timeout configuration with the existing async-threshold environment variable. The document also notes the breaking-change implications and shows the migration path from request-level timeout configuration to environment-based operational settings.
 
 ### src
 
-Top-level source directory that organizes the codebase into domain modules. Serves as the integration layer where detection and tools can be composed by higher-level application code.
-
-**Files:**
-
-- `src/main.rs` : Main entry point with tracing initialization and MCP server startup
-- `src/server.rs` : MCP server implementation with enhanced terminal tools
+Main application code for the MCP server. `server.rs` implements the tool-facing service and shared state, while `main.rs` provides the async stdio entry point and runtime initialization; the `tools` and `detection` subdirectories hold the domain-specific logic behind that API.
 
 #### src/detection
 
-Contains the core detection module, including algorithms and pipeline components tailored for detection tasks. Designed to keep domain logic focused and allow extension with new detectors or strategies.
+Host-environment discovery utilities used by the server. This module detects available shells and developer tooling on PATH, including bounded version probing, and exposes those capabilities through a small public surface.
 
 **Files:**
 
-- `src/detection/binary_detector.rs` : Binary detection and version probing utilities
-- `src/detection/mod.rs` : Detection module exports
+- `src/detection/binary_detector.rs` (rel=5): Implements developer-tool and shell discovery by scanning a large categorized candidate list, locating binaries on PATH, and probing versions with bounded concurrency and timeouts. The detector uses chunked thread spawning plus shared result aggregation to balance parallelism with predictable resource usage, then sorts and optionally filters missing tools from the final report. It also defines the shell metadata structures and common shell candidates used during startup detection, making it the backbone of environment introspection features.
+- `src/detection/mod.rs` (rel=2): Detection module barrel re-exporting binary and shell detection entry points. It keeps the server decoupled from the detector implementation details.
 
 #### src/tools
 
-Provides auxiliary tooling to support detection workflows, such as data preprocessing, evaluation helpers, experiment orchestration, or CLI utilities. Keeps non-core scripts separated from the detection logic for cleaner maintenance.
+Core execution subsystem for the server. It combines command validation and spawning, in-memory job lifecycle tracking, PTY interaction support, and denylist-based safety checks, and then re-exports those pieces through a small module barrel for use by the server layer.
 
 **Files:**
 
-- `src/tools/denylist.rs` : Command denylist for security
-- `src/tools/job_manager.rs` : Background job management with status tracking
-- `src/tools/mod.rs` : Tools module exports
-- `src/tools/terminal_executor.rs` : Terminal command execution with smart async switching and channel-based I/O
+- `src/tools/denylist.rs` (rel=4): Security helper defining the default dangerous-command pattern list and case-insensitive substring matching used to block risky executions before spawn. It also reports the matched pattern for user-facing denial reasons and includes focused unit tests for default, custom, and case-insensitive behavior.
+- `src/tools/job_manager.rs` (rel=5): In-memory job registry responsible for creating readable adjective-noun-number job IDs, storing job metadata, tracking status transitions, and retaining both preview and full output. It manages PTY stdin writers for interactive background jobs, supports incremental read positions and paginated output retrieval, and records timing, tags, summaries, and process IDs. Synchronization is handled with Arc<Mutex<...>> around job maps, counters, and stdin writers so the executor and server can safely coordinate across async tasks and threads. This is the central state-management component behind background execution and job lifecycle APIs.
+- `src/tools/mod.rs` (rel=2): Tools module barrel that exposes denylist, job management, and terminal execution submodules plus their main public types and functions. It provides the server layer with a compact import surface for core execution features.
+- `src/tools/terminal_executor.rs` (rel=5): Primary command-execution engine that validates requests, enforces denylist security, resolves working directories, configures PTYs, spawns shell commands, and manages sync-versus-background execution behavior. It implements token-bounded preview generation with the o200k tokenizer, bounded preview buffering, optional streaming MCP logging notifications, environment normalization for predictable terminal output, and timeout/async-threshold handling via environment variables. The executor also contains sudo-related logic for priming credentials, wrapping commands for non-interactive reuse, and optionally starting keepalive behavior, then records results into the JobManager while preserving stdin access for async jobs. This file contains the project's most important runtime algorithms and side effects around process lifecycle, output capture, and user-visible execution semantics.
 
-## Key Implementation Details
+**Files:**
 
-### Enhanced Terminal MCP Server
+- `src/main.rs` (rel=3): Minimal async entry point that initializes tracing, constructs the server, and serves it over MCP stdio transport until shutdown. It wires together the top-level modules and establishes environment-driven logging for runtime diagnostics.
+- `src/server.rs` (rel=5): Core MCP server implementation that defines tool schemas, initializes shell metadata at startup, validates inputs, and routes tool calls through rmcp's tool router. It owns the shared JobManager, exposes the terminal and job-management APIs, and formats server/tool descriptions so clients understand supported shells, parameters, and behavior. The file also implements persistent JSONL audit logging for every enhanced_terminal invocation, including environment-configurable log path handling and RFC3339 timestamps. Overall, this is the orchestration layer connecting MCP protocol concerns with execution, detection, and job-tracking subsystems.
 
-This is an MCP (Model Context Protocol) server that provides enhanced terminal execution capabilities with smart async switching to prevent timeout issues.
+### tests
 
-**Core Features:**
+Integration-style test coverage for the MCP server. The test harness launches the compiled server over stdio and exercises it through an MCP client, validating tool registration, command execution behavior, and logging/integration semantics rather than isolated unit logic.
 
-1. **Smart Async Switching**: Commands automatically switch to background execution when they exceed a configurable threshold (default: 50 seconds), preventing Zed's 60-second timeout
-2. **Channel-based I/O**: Uses `mpsc::channel` to move PTY reading to a separate thread, allowing the main thread to check elapsed time every 10ms without blocking on I/O
-3. **Job Management**: Background jobs can be monitored, listed, and canceled
-4. **Security**: Command denylist to prevent dangerous operations
-5. **Tracing**: Comprehensive logging with `tracing` crate for debugging
+**Files:**
 
-**Architecture:**
+- `tests/mcp_client.rs` (rel=4): Integration-style test harness that launches the compiled MCP server as a child process over stdio and exercises it through the rmcp client APIs. It verifies tool registration, command execution behavior, JSONL call logging, default working-directory semantics, readable job ID formatting, and other end-to-end contracts visible to MCP clients. The helpers abstract transport setup with optional environment variables and cwd overrides so tests can validate server behavior under realistic process conditions.
 
-- **Reader Thread**: Continuously reads from PTY, sends data via channel
-- **Main Thread**: Non-blockingly receives from channel, checks elapsed time every 10ms
-- **Background Thread**: Spawned when async threshold reached, continues receiving from same channel
-- **Job Manager**: Tracks job status, output, and metadata
+**Files:**
 
-**Recent Bug Fixes:**
+- `Cargo.toml` (rel=3): Rust package manifest defining the MCP server crate, its runtime stack, and Unix-specific dependencies. It shows the project is built on `rmcp`, `tokio`, `portable-pty`, `serde`, `tracing`, and related libraries for async MCP transport, PTY command execution, and structured serialization/logging.
+- `README.md` (rel=5): Primary project guide describing the Enhanced Terminal MCP Server, its MCP tools, and the overall architecture around PTY-backed command execution, job management, binary detection, and startup shell discovery. It documents core behavioral contracts such as smart async switching, streaming notifications, denylist-based command blocking, token-bounded previews, job filtering/pagination, and JSONL call logging. It also explains the sudo workflow in depth, including askpass priming, non-interactive wrapping, keepalive behavior, and relevant environment variables. This is the main operational reference for installation, configuration, client integration, and expected tool inputs and outputs.
+- `test_mcp.sh` (rel=2): Simple shell smoke test that starts the built MCP server briefly over stdio, confirms the process stays up, and prints binary and local Zed configuration details.
+- `test_timeout_fix.sh` (rel=3): Shell verification script that builds the project and checks for expected timeout-fix implementation markers in the Rust source and documentation. It validates the presence of Tokio async patterns, timeout-based receive logic, the default async threshold, and supporting docs, acting as a lightweight regression smoke test for the timeout-handling redesign.
 
-- Fixed timeout issue where commands would timeout despite async threshold < 60s
-- Root cause: Main thread was blocked in `reader.read()` and couldn't check elapsed time
-- Solution: Moved reader to separate thread with channel communication
-- Result: Async switch happens within 10ms of threshold reliably
-
-**Environment Variables:**
-
-For commands like `gh` that detect PTY and show interactive prompts, use:
-- `GH_PAGER=""` 
-- `PAGER="cat"`
-- `TERM="dumb"`
 
 ## Summary Statistics
+- Generated at: 2026-05-13 11:46:53 UTC
+- Total files in repository: 23
+- Total textual files scanned: 22
+- Files included after budget/filter: 20
+- Strategy (comprehension level): comprehensive
+- Batches executed: 2
+- Avg estimated tokens per batch: 18_284
+- Model (generation): gpt-5.4
+- Token budget (input): 272_000
+- Summary token count: 2_967
 
-- Total files in repository: 28
-- Total textual files scanned: 28
-- Files included after budget/filter: 28
-- Strategy (comprehension level): comprehensive (auto-selected)
-- Model (generation): gpt-5
-- Summary token count: 845
+## Summary Cost Analysis
+
+- Total tokens processed: 41883
+  - Input tokens (sent to API): 38483
+  - API cached tokens (prompt cache): 0
+  - Output tokens: 3400
+  - Local cached tokens (files not sent): 0
+- Local cache: 0 files skipped
+- Actual cost (with all caching): 0.8242196500000001
+- Cost without any cache: 0.8242196500000001
+- Total savings: 0.0
+  - API cache savings: 0.0
+  - Local cache savings: 0.0

@@ -196,6 +196,99 @@ async fn enhanced_terminal_logs_calls_to_jsonl() {
     let _ = fs::remove_file(&log_path);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn enhanced_terminal_concurrent_processes_log_valid_jsonl() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after epoch")
+        .as_nanos();
+    let log_path = std::env::temp_dir().join(format!(
+        "enhanced_terminal_concurrent_calls_{}_{}.jsonl",
+        std::process::id(),
+        unique
+    ));
+    let _ = fs::remove_file(&log_path);
+    let log_path_string = log_path.display().to_string();
+
+    let mut tasks = Vec::new();
+    for index in 0..8 {
+        let log_path_string = log_path_string.clone();
+        tasks.push(tokio::spawn(async move {
+            let client = connect_child_client_with_env(&[(
+                "ENHANCED_TERMINAL_CALL_LOG_PATH",
+                log_path_string.as_str(),
+            )])
+            .await;
+            let marker = format!("concurrent-log-marker-{index}");
+            let long_comment = "x".repeat(4096);
+            let command = format!("printf {marker} # {long_comment}");
+
+            let res = client
+                .peer()
+                .call_tool(CallToolRequestParam {
+                    name: Cow::Borrowed("enhanced_terminal"),
+                    arguments: Some(
+                        serde_json::from_value::<serde_json::Map<String, Value>>(json!({
+                            "command": command,
+                            "cwd": ".",
+                            "shell": "bash",
+                            "force_sync": true,
+                            "preview_tokens": 0,
+                            "tags": ["concurrent-log-test", marker]
+                        }))
+                        .expect("tool arguments must be a JSON object")
+                        .into_iter()
+                        .collect(),
+                    ),
+                })
+                .await
+                .expect("tools/call enhanced_terminal failed");
+
+            let text = text_from_calltool(res);
+            assert!(text.contains(&marker), "unexpected output: {text}");
+            marker
+        }));
+    }
+
+    let mut expected_markers = Vec::new();
+    for task in tasks {
+        expected_markers.push(task.await.expect("concurrent log task panicked"));
+    }
+    expected_markers.sort();
+
+    let log_text = fs::read_to_string(&log_path).expect("call log should be written");
+    let lines: Vec<&str> = log_text.lines().collect();
+    assert_eq!(
+        lines.len(),
+        expected_markers.len(),
+        "expected exactly one JSONL record per call; log was: {log_text}"
+    );
+
+    let mut actual_markers = Vec::new();
+    for (line_number, line) in lines.iter().enumerate() {
+        let entry: Value = serde_json::from_str(line).unwrap_or_else(|error| {
+            panic!(
+                "call log line {} should be valid JSON: {error}; line was: {line}",
+                line_number + 1
+            )
+        });
+        assert_eq!(entry["tool"], "enhanced_terminal");
+        let command = entry["parameters"]["command"]
+            .as_str()
+            .expect("logged command should be a string");
+        let marker = command
+            .split_whitespace()
+            .nth(1)
+            .expect("logged command should include marker")
+            .to_string();
+        actual_markers.push(marker);
+    }
+    actual_markers.sort();
+    assert_eq!(actual_markers, expected_markers);
+
+    let _ = fs::remove_file(&log_path);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn enhanced_terminal_omitted_cwd_uses_server_process_cwd() {
     let unique = SystemTime::now()

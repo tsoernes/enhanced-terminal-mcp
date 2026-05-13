@@ -8,7 +8,17 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{fs::OpenOptions, io::Write, path::PathBuf};
+use std::{
+    fs::{File, OpenOptions},
+    io::{self, Write},
+    path::PathBuf,
+    sync::Mutex,
+};
+
+#[cfg(unix)]
+use nix::fcntl::FlockArg;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, RawFd};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -36,6 +46,7 @@ fn default_version_timeout() -> u64 {
 }
 
 const ENHANCED_TERMINAL_CALL_LOG_FILE: &str = "enhanced_terminal_calls.jsonl";
+static ENHANCED_TERMINAL_CALL_LOG_MUTEX: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Serialize)]
 struct EnhancedTerminalCallLogEntry<'a> {
@@ -52,22 +63,53 @@ fn enhanced_terminal_call_log_path() -> PathBuf {
         })
 }
 
-fn log_enhanced_terminal_call(input: &TerminalExecutionInput) -> std::io::Result<()> {
+#[cfg(unix)]
+struct CallLogFileLock(RawFd);
+
+#[cfg(unix)]
+impl Drop for CallLogFileLock {
+    fn drop(&mut self) {
+        #[allow(deprecated)]
+        let _ = nix::fcntl::flock(self.0, FlockArg::Unlock);
+    }
+}
+
+#[cfg(unix)]
+fn lock_call_log_file(file: &File) -> io::Result<CallLogFileLock> {
+    let fd = file.as_raw_fd();
+    #[allow(deprecated)]
+    nix::fcntl::flock(fd, FlockArg::LockExclusive).map_err(io::Error::other)?;
+    Ok(CallLogFileLock(fd))
+}
+
+fn write_call_log_line(file: &mut File, line: &[u8]) -> io::Result<()> {
+    #[cfg(unix)]
+    let _file_lock = lock_call_log_file(file)?;
+
+    file.write_all(line)?;
+    file.flush()
+}
+
+fn log_enhanced_terminal_call(input: &TerminalExecutionInput) -> io::Result<()> {
     let entry = EnhancedTerminalCallLogEntry {
         datetime: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         tool: "enhanced_terminal",
         parameters: input,
     };
 
+    let mut line = serde_json::to_vec(&entry).map_err(io::Error::other)?;
+    line.push(0x0A);
+
+    let _process_guard = ENHANCED_TERMINAL_CALL_LOG_MUTEX
+        .lock()
+        .map_err(|e| io::Error::other(format!("call log mutex poisoned: {e}")))?;
+
     let log_path = enhanced_terminal_call_log_path();
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(log_path)?;
-    serde_json::to_writer(&mut file, &entry)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    writeln!(file)?;
-    Ok(())
+    write_call_log_line(&mut file, &line)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

@@ -175,7 +175,7 @@ Add to your MCP client configuration (e.g., Claude Desktop, Zed):
 
 ### Call Logging
 
-Every `enhanced_terminal` tool call is appended as one JSON object per line to `enhanced_terminal_calls.jsonl` in the repository root. Each entry includes an RFC3339 UTC `datetime`, the tool name, and the full submitted parameters.
+Every `enhanced_terminal` tool call is appended as one JSON object per line to `enhanced_terminal_calls.jsonl` in the repository root. Each entry includes an RFC3339 UTC `datetime`, the tool name, and the full submitted parameters. Writes are serialized with an in-process mutex and, on Unix, an exclusive file lock so concurrent tool calls and test server processes do not interleave JSON records.
 
 Override the log path with `ENHANCED_TERMINAL_CALL_LOG_PATH` if needed.
 
@@ -567,7 +567,7 @@ This server uses a modular structure with Rust 2024 edition:
 - **Async Threshold**: `50` seconds (`ENHANCED_TERMINAL_ASYNC_THRESHOLD_SECS`)
 - **Timeout**: `None` by default (`ENHANCED_TERMINAL_TIMEOUT_SECS` enables a timeout)
 - **Job IDs**: readable `adjective-noun-number` handles
-- **Call Log**: `enhanced_terminal_calls.jsonl` in the repo root (`ENHANCED_TERMINAL_CALL_LOG_PATH` overrides)
+- **Call Log**: concurrent-safe JSONL at `enhanced_terminal_calls.jsonl` in the repo root (`ENHANCED_TERMINAL_CALL_LOG_PATH` overrides)
 - **Max Binary Detection Concurrency**: `16`
 - **Version Probe Timeout**: `1500` ms
 
